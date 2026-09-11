@@ -1095,6 +1095,65 @@
             seasonHistory: {} // { playerId: { 'fall-2025': {...stats}, 'spring-2025': {...stats} } }
         };
 
+        // ============================================
+        // PERSISTENCE (localStorage)
+        // ============================================
+
+        const STORAGE_KEYS = {
+            players: 'players',
+            seasons: 'seasons',
+            currentSeasonId: 'currentSeason',
+            seasonHistory: 'seasonHistory',
+            parentAccess: 'parentAccess',
+            plans: 'developmentPlans',
+            pendingParentRequests: 'pendingParentRequests'
+        };
+
+        // Persist the coach-editable parts of appState. Call after any
+        // mutation to players/seasons/parentAccess/plans/pendingParentRequests.
+        function saveState() {
+            try {
+                localStorage.setItem(STORAGE_KEYS.players, JSON.stringify(appState.players));
+                localStorage.setItem(STORAGE_KEYS.seasons, JSON.stringify(appState.seasons));
+                localStorage.setItem(STORAGE_KEYS.currentSeasonId, appState.currentSeasonId);
+                localStorage.setItem(STORAGE_KEYS.seasonHistory, JSON.stringify(appState.seasonHistory));
+                localStorage.setItem(STORAGE_KEYS.parentAccess, JSON.stringify(appState.parentAccess));
+                localStorage.setItem(STORAGE_KEYS.plans, JSON.stringify(appState.plans));
+                localStorage.setItem(STORAGE_KEYS.pendingParentRequests, JSON.stringify(appState.pendingParentRequests));
+            } catch (error) {
+                console.error('Save error:', error);
+            }
+        }
+
+        // Restore appState from localStorage, if a previous save exists.
+        // Fields with nothing saved keep whatever default was already set on appState.
+        function loadState() {
+            try {
+                const storedPlayers = localStorage.getItem(STORAGE_KEYS.players);
+                if (storedPlayers) appState.players = JSON.parse(storedPlayers);
+
+                const storedSeasons = localStorage.getItem(STORAGE_KEYS.seasons);
+                if (storedSeasons) appState.seasons = JSON.parse(storedSeasons);
+
+                const storedCurrentSeasonId = localStorage.getItem(STORAGE_KEYS.currentSeasonId);
+                if (storedCurrentSeasonId) appState.currentSeasonId = storedCurrentSeasonId;
+
+                const storedSeasonHistory = localStorage.getItem(STORAGE_KEYS.seasonHistory);
+                if (storedSeasonHistory) appState.seasonHistory = JSON.parse(storedSeasonHistory);
+
+                const storedParentAccess = localStorage.getItem(STORAGE_KEYS.parentAccess);
+                if (storedParentAccess) appState.parentAccess = JSON.parse(storedParentAccess);
+
+                const storedPlans = localStorage.getItem(STORAGE_KEYS.plans);
+                if (storedPlans) appState.plans = JSON.parse(storedPlans);
+
+                const storedPendingRequests = localStorage.getItem(STORAGE_KEYS.pendingParentRequests);
+                if (storedPendingRequests) appState.pendingParentRequests = JSON.parse(storedPendingRequests);
+            } catch (error) {
+                console.error('Load error:', error);
+            }
+        }
+
         // Sample data based on CSV structure
         const samplePlayers = [
             // [player roster entry redacted for privacy]
@@ -1113,6 +1172,9 @@
         ];
 
         appState.players = samplePlayers;
+
+        // Restore any previously saved coach data (overrides sample data above if present)
+        loadState();
 
         // Initialize season data
         initializeSeasonData();
@@ -1175,7 +1237,8 @@
                                 requestDate: new Date().toISOString(),
                                 status: 'pending'
                             });
-                            
+                            saveState();
+
                             alert('Access request submitted! The coach will review your request shortly.');
                         }
                     }
@@ -2769,6 +2832,7 @@ Example:
                 assignedDate: new Date().toISOString(),
                 adherence: []
             };
+            saveState();
 
             // Show success message with plan summary
             const summary = `
@@ -3231,6 +3295,7 @@ Example:
 
             appState.players.push(newPlayer);
             appState.players.sort((a, b) => a.number - b.number);
+            saveState();
 
             // Regenerate signals
             generateFocusSignals();
@@ -3310,6 +3375,7 @@ Example:
                     parent.playerNumber = newNumber;
                 }
             });
+            saveState();
 
             generateFocusSignals();
             renderTeamManagement();
@@ -3342,6 +3408,7 @@ Example:
 
             // Remove plans
             delete appState.plans[playerNumber];
+            saveState();
 
             generateFocusSignals();
             renderTeamManagement();
@@ -3424,6 +3491,7 @@ Example:
                 requestDate: new Date().toISOString(),
                 approvedDate: new Date().toISOString()
             });
+            saveState();
 
             renderTeamManagement();
             closeModal('messageModal');
@@ -3454,6 +3522,7 @@ Example:
 
             // Remove from pending
             appState.pendingParentRequests.splice(requestIdx, 1);
+            saveState();
 
             renderTeamManagement();
             alert(`Access approved for ${request.parentName}!`);
@@ -3475,6 +3544,7 @@ Example:
 
             // Remove from pending
             appState.pendingParentRequests.splice(requestIdx, 1);
+            saveState();
 
             renderTeamManagement();
             alert(`Access request denied.`);
@@ -3637,6 +3707,7 @@ Example:
 
             // Reset plans and signals
             appState.plans = {};
+            saveState();
             generateFocusSignals();
 
             // Update all views
@@ -3908,6 +3979,7 @@ Example:
             appState.parentAccess = appState.parentAccess.filter(
                 p => !(p.parentEmail === parentEmail && p.playerNumber === playerNumber)
             );
+            saveState();
 
             renderTeamManagement();
             alert(`Access revoked for ${parent.parentName}.`);
@@ -4936,6 +5008,10 @@ Example:
 
         function exportAllData() {
             try {
+                // Make sure localStorage reflects the current in-memory state
+                // (covers the case where nothing has triggered a save yet)
+                saveState();
+
                 // Collect all data from localStorage
                 const backupData = {
                     version: '1.0',
@@ -4946,8 +5022,9 @@ Example:
                         seasons: localStorage.getItem('seasons'),
                         currentSeason: localStorage.getItem('currentSeason'),
                         parentAccess: localStorage.getItem('parentAccess'),
-                        focusSignals: localStorage.getItem('focusSignals'),
-                        developmentPlans: localStorage.getItem('developmentPlans')
+                        pendingParentRequests: localStorage.getItem('pendingParentRequests'),
+                        developmentPlans: localStorage.getItem('developmentPlans'),
+                        seasonHistory: localStorage.getItem('seasonHistory')
                     }
                 };
                 
