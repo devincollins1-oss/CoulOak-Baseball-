@@ -52,8 +52,10 @@
             margin-bottom: 20px;
             box-shadow: 0 4px 12px rgba(0,0,0,0.15);
             display: flex;
+            flex-wrap: wrap;
             justify-content: space-between;
             align-items: center;
+            gap: 12px;
         }
 
         .app-header h1 {
@@ -907,6 +909,20 @@
         tr:hover {
             background: #f8f9fa;
         }
+
+        @media (max-width: 480px) {
+            .app-header {
+                padding: 18px;
+            }
+
+            .app-header h1 {
+                font-size: 19px;
+            }
+
+            .user-info {
+                text-align: left;
+            }
+        }
     </style>
 </head>
 <body>
@@ -925,11 +941,21 @@
                 </select>
             </div>
 
+            <div class="form-group" id="coachPasswordGroup" style="display: none;">
+                <label>Coach Password</label>
+                <input type="password" id="coachPassword" autocomplete="current-password">
+            </div>
+
             <div class="form-group" id="playerSelectGroup" style="display: none;">
                 <label>My child is...</label>
                 <select id="playerSelect">
                     <option value="">Select player</option>
                 </select>
+            </div>
+
+            <div class="form-group" id="parentAccessCodeGroup" style="display: none;">
+                <label>Access Code</label>
+                <input type="text" id="parentAccessCode" placeholder="Ask your coach for this code" autocomplete="off">
             </div>
 
             <button class="btn btn-primary" onclick="login()">Enter</button>
@@ -1095,24 +1121,146 @@
             seasonHistory: {} // { playerId: { 'fall-2025': {...stats}, 'spring-2025': {...stats} } }
         };
 
-        // Sample data based on CSV structure
-        const samplePlayers = [
-            // [player roster entry redacted for privacy]
-            // [player roster entry redacted for privacy]
-            // [player roster entry redacted for privacy]
-            // [player roster entry redacted for privacy]
-            // [player roster entry redacted for privacy]
-            // [player roster entry redacted for privacy]
-            // [player roster entry redacted for privacy]
-            // [player roster entry redacted for privacy]
-            // [player roster entry redacted for privacy]
-            // [player roster entry redacted for privacy]
-            // [player roster entry redacted for privacy]
-            // [player roster entry redacted for privacy]
-            // [player roster entry redacted for privacy]
-        ];
+        // ============================================
+        // PERSISTENCE (localStorage)
+        // ============================================
 
-        appState.players = samplePlayers;
+        const STORAGE_KEYS = {
+            players: 'players',
+            seasons: 'seasons',
+            currentSeasonId: 'currentSeason',
+            seasonHistory: 'seasonHistory',
+            parentAccess: 'parentAccess',
+            plans: 'developmentPlans',
+            pendingParentRequests: 'pendingParentRequests'
+        };
+
+        // Persist the coach-editable parts of appState. Call after any
+        // mutation to players/seasons/parentAccess/plans/pendingParentRequests.
+        function saveState() {
+            try {
+                localStorage.setItem(STORAGE_KEYS.players, JSON.stringify(appState.players));
+                localStorage.setItem(STORAGE_KEYS.seasons, JSON.stringify(appState.seasons));
+                localStorage.setItem(STORAGE_KEYS.currentSeasonId, appState.currentSeasonId);
+                localStorage.setItem(STORAGE_KEYS.seasonHistory, JSON.stringify(appState.seasonHistory));
+                localStorage.setItem(STORAGE_KEYS.parentAccess, JSON.stringify(appState.parentAccess));
+                localStorage.setItem(STORAGE_KEYS.plans, JSON.stringify(appState.plans));
+                localStorage.setItem(STORAGE_KEYS.pendingParentRequests, JSON.stringify(appState.pendingParentRequests));
+            } catch (error) {
+                console.error('Save error:', error);
+            }
+        }
+
+        // Restore appState from localStorage, if a previous save exists.
+        // Fields with nothing saved keep whatever default was already set on appState.
+        function loadState() {
+            try {
+                const storedPlayers = localStorage.getItem(STORAGE_KEYS.players);
+                if (storedPlayers) appState.players = JSON.parse(storedPlayers);
+
+                const storedSeasons = localStorage.getItem(STORAGE_KEYS.seasons);
+                if (storedSeasons) appState.seasons = JSON.parse(storedSeasons);
+
+                const storedCurrentSeasonId = localStorage.getItem(STORAGE_KEYS.currentSeasonId);
+                if (storedCurrentSeasonId) appState.currentSeasonId = storedCurrentSeasonId;
+
+                const storedSeasonHistory = localStorage.getItem(STORAGE_KEYS.seasonHistory);
+                if (storedSeasonHistory) appState.seasonHistory = JSON.parse(storedSeasonHistory);
+
+                const storedParentAccess = localStorage.getItem(STORAGE_KEYS.parentAccess);
+                if (storedParentAccess) appState.parentAccess = JSON.parse(storedParentAccess);
+
+                const storedPlans = localStorage.getItem(STORAGE_KEYS.plans);
+                if (storedPlans) appState.plans = JSON.parse(storedPlans);
+
+                const storedPendingRequests = localStorage.getItem(STORAGE_KEYS.pendingParentRequests);
+                if (storedPendingRequests) appState.pendingParentRequests = JSON.parse(storedPendingRequests);
+            } catch (error) {
+                console.error('Load error:', error);
+            }
+        }
+
+        // ============================================
+        // AUTH (coach password + per-player access codes)
+        // ============================================
+        // NOTE: this is a client-side-only, backend-less app, so none of this
+        // is cryptographically secure against someone determined to read the
+        // page source — it exists to stop casual/accidental access, not a
+        // motivated attacker.
+
+        const COACH_PASSWORD_HASH_KEY = 'coachPasswordHash'; // deliberately NOT in STORAGE_KEYS/backups
+
+        async function hashText(text) {
+            const data = new TextEncoder().encode(text);
+            const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+            return Array.from(new Uint8Array(hashBuffer)).map(b => b.toString(16).padStart(2, '0')).join('');
+        }
+
+        // Escape untrusted text before interpolating it into an innerHTML template
+        // string. Anything a parent or coach types (names, comments, custom drill/cue
+        // text) must go through this before it hits the DOM, or it can run as script
+        // in whoever views that data next.
+        function escapeHtml(str) {
+            if (str === null || str === undefined) return '';
+            return String(str)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
+        function generateAccessCode() {
+            const chars = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'; // no 0/O/1/I/L - avoids look-alike mixups
+            let code = '';
+            for (let i = 0; i < 6; i++) {
+                code += chars[Math.floor(Math.random() * chars.length)];
+            }
+            return code;
+        }
+
+        window.changeCoachPassword = async function() {
+            const storedHash = localStorage.getItem(COACH_PASSWORD_HASH_KEY);
+
+            if (storedHash) {
+                const currentPassword = prompt('Enter your current coach password:');
+                if (!currentPassword) return;
+                if (await hashText(currentPassword) !== storedHash) {
+                    alert('Incorrect current password.');
+                    return;
+                }
+            }
+
+            const newPassword = prompt('Enter a new coach password:');
+            if (!newPassword) return;
+            const confirmPassword = prompt('Confirm new coach password:');
+            if (newPassword !== confirmPassword) {
+                alert('Passwords did not match - password was not changed.');
+                return;
+            }
+
+            localStorage.setItem(COACH_PASSWORD_HASH_KEY, await hashText(newPassword));
+            alert('Coach password updated.');
+        }
+
+        // No roster ships in the source - a fresh browser starts empty and the
+        // coach adds players (Team Management -> Add Player) or imports a
+        // backup. Real player names/stats belong in localStorage or a backup
+        // file, never committed to source control (this repo is public).
+        appState.players = [];
+
+        // Restore any previously saved coach data (overrides the empty roster above if present)
+        loadState();
+
+        // Ensure every player has an access code (covers older saved rosters)
+        let backfilledAccessCodes = false;
+        appState.players.forEach(player => {
+            if (!player.accessCode) {
+                player.accessCode = generateAccessCode();
+                backfilledAccessCodes = true;
+            }
+        });
+        if (backfilledAccessCodes) saveState();
 
         // Initialize season data
         initializeSeasonData();
@@ -1120,23 +1268,68 @@
         // Login
         document.getElementById('userRole').addEventListener('change', (e) => {
             const playerGroup = document.getElementById('playerSelectGroup');
+            const accessCodeGroup = document.getElementById('parentAccessCodeGroup');
+            const coachPasswordGroup = document.getElementById('coachPasswordGroup');
+
             if (e.target.value === 'parent') {
                 playerGroup.style.display = 'block';
+                accessCodeGroup.style.display = 'block';
+                coachPasswordGroup.style.display = 'none';
                 const select = document.getElementById('playerSelect');
                 select.innerHTML = '<option value="">Select player</option>';
                 appState.players.forEach(p => {
                     select.innerHTML += `<option value="${p.number}">#${p.number} ${p.first} ${p.last}</option>`;
                 });
+            } else if (e.target.value === 'coach') {
+                playerGroup.style.display = 'none';
+                accessCodeGroup.style.display = 'none';
+                coachPasswordGroup.style.display = 'block';
             } else {
                 playerGroup.style.display = 'none';
+                accessCodeGroup.style.display = 'none';
+                coachPasswordGroup.style.display = 'none';
             }
         });
 
-        function login() {
+        async function login() {
             const role = document.getElementById('userRole').value;
             if (!role) {
                 alert('Please select your role');
                 return;
+            }
+
+            if (role === 'coach') {
+                const enteredPassword = document.getElementById('coachPassword').value;
+                const storedHash = localStorage.getItem(COACH_PASSWORD_HASH_KEY);
+
+                if (!storedHash) {
+                    // First time on this device/browser: whoever is here sets the coach password
+                    const wantsSetup = confirm(
+                        'No coach password has been set on this device yet.\n\n' +
+                        'Set one now? Anyone who knows it will have full coach access.'
+                    );
+                    if (!wantsSetup) return;
+
+                    const newPassword = prompt('Enter a new coach password:');
+                    if (!newPassword) return;
+                    const confirmPassword = prompt('Confirm coach password:');
+                    if (newPassword !== confirmPassword) {
+                        alert('Passwords did not match - please try again.');
+                        return;
+                    }
+
+                    localStorage.setItem(COACH_PASSWORD_HASH_KEY, await hashText(newPassword));
+                    alert('Coach password set! Logging you in now.');
+                } else {
+                    if (!enteredPassword) {
+                        alert('Please enter the coach password');
+                        return;
+                    }
+                    if (await hashText(enteredPassword) !== storedHash) {
+                        alert('Incorrect coach password');
+                        return;
+                    }
+                }
             }
 
             if (role === 'parent') {
@@ -1145,43 +1338,20 @@
                     alert('Please select your child');
                     return;
                 }
-                
+
                 const player = appState.players.find(p => p.number == playerId);
-                
-                // In a real system, you'd check against actual parent email
-                // For demo, we'll simulate checking if parent has access
-                const hasAccess = appState.parentAccess.some(
-                    p => p.playerNumber == playerId && p.status === 'approved'
-                );
-                
-                if (!hasAccess && appState.parentAccess.length > 0) {
-                    // Show access request option
-                    const requestAccess = confirm(
-                        `Parent access not yet approved for ${player.first} ${player.last}.\n\n` +
-                        `Would you like to request access?\n\n` +
-                        `The coach will review your request.`
-                    );
-                    
-                    if (requestAccess) {
-                        // Simulate parent request
-                        const parentName = prompt('Enter your name:');
-                        const parentEmail = prompt('Enter your email:');
-                        
-                        if (parentName && parentEmail) {
-                            appState.pendingParentRequests.push({
-                                parentName: parentName,
-                                parentEmail: parentEmail.toLowerCase(),
-                                playerNumber: parseInt(playerId),
-                                requestDate: new Date().toISOString(),
-                                status: 'pending'
-                            });
-                            
-                            alert('Access request submitted! The coach will review your request shortly.');
-                        }
-                    }
+                const enteredCode = document.getElementById('parentAccessCode').value.trim().toUpperCase();
+
+                if (!enteredCode) {
+                    alert('Please enter the access code your coach gave you');
                     return;
                 }
-                
+
+                if (enteredCode !== player.accessCode) {
+                    alert(`Incorrect access code for ${player.first} ${player.last}.\n\nAsk your coach for the current access code.`);
+                    return;
+                }
+
                 appState.currentPlayer = player;
             }
 
@@ -1451,14 +1621,29 @@
 
         // Render Team Overview
         function renderTeamOverview() {
+            if (appState.players.length === 0) {
+                document.getElementById('teamStats').innerHTML = `
+                    <div class="player-card" style="text-align: center; padding: 40px;">
+                        <div style="font-size: 48px; margin-bottom: 15px;">⚾</div>
+                        <h3 style="margin-bottom: 10px;">No players yet</h3>
+                        <p style="color: #7f8c8d;">Add your roster in Team Management to get started.</p>
+                    </div>
+                `;
+                return;
+            }
+
             const totalPA = appState.players.reduce((sum, p) => sum + p.pa, 0);
+            const totalAB = appState.players.reduce((sum, p) => sum + p.ab, 0);
             const totalK = appState.players.reduce((sum, p) => sum + p.k, 0);
             const totalBB = appState.players.reduce((sum, p) => sum + p.bb, 0);
             const totalH = appState.players.reduce((sum, p) => sum + p.h, 0);
 
-            const teamAvg = (totalH / appState.players.reduce((sum, p) => sum + p.ab, 0)).toFixed(3);
-            const teamKRate = (totalK / totalPA * 100).toFixed(1);
-            const teamBBRate = (totalBB / totalPA * 100).toFixed(1);
+            const teamAvg = totalAB > 0 ? (totalH / totalAB).toFixed(3) : '0.000';
+            const teamKRate = totalPA > 0 ? (totalK / totalPA * 100).toFixed(1) : '0.0';
+            const teamBBRate = totalPA > 0 ? (totalBB / totalPA * 100).toFixed(1) : '0.0';
+            const playersNeedingAttention = new Set(
+                appState.focusSignals.filter(s => s.priority === 'high' || s.priority === 'watch').map(s => s.player.number)
+            ).size;
 
             document.getElementById('teamStats').innerHTML = `
                 <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px;">
@@ -1485,15 +1670,15 @@
                     </div>
                     <div class="player-card">
                         <h3 style="margin-bottom: 15px;">Focus Alerts</h3>
-                        <div class="stat-item ${appState.focusSignals.length > 3 ? 'flagged' : ''}">
+                        <div class="stat-item ${playersNeedingAttention > 3 ? 'flagged' : ''}">
                             <div class="stat-label">Players Needing Attention</div>
-                            <div class="stat-value ${appState.focusSignals.length > 3 ? 'bad' : ''}">${appState.focusSignals.length}</div>
+                            <div class="stat-value ${playersNeedingAttention > 3 ? 'bad' : ''}">${playersNeedingAttention}</div>
                         </div>
                     </div>
                 </div>
                 <div class="player-card" style="margin-top: 20px;">
-                    <h3>Last Uploaded Stats: Couloak Diesel 11U Fall 2025</h3>
-                    <p style="color: #7f8c8d; margin-top: 10px;">Data includes ${appState.players.length} players across 22 games</p>
+                    <h3>Current Season: ${getCurrentSeason().name}</h3>
+                    <p style="color: #7f8c8d; margin-top: 10px;">Data includes ${appState.players.length} player${appState.players.length !== 1 ? 's' : ''}</p>
                 </div>
             `;
         }
@@ -1625,6 +1810,7 @@
                                             <td style="padding: 12px; font-weight: bold;">${signal.player.number}</td>
                                             <td style="padding: 12px;">
                                                 <div style="font-weight: 600; color: #2c3e50;">${signal.player.first} ${signal.player.last}</div>
+                                                <div style="font-size: 11px; color: #7f8c8d; text-transform: capitalize;">${signal.category}</div>
                                             </td>
                                             <td style="padding: 12px;">
                                                 <span style="background: ${statusColor}; color: white; padding: 4px 10px; border-radius: 4px; font-size: 11px; font-weight: bold; white-space: nowrap;">
@@ -1781,10 +1967,10 @@
         function renderCoachMessages() {
             let html = '<h2 style="margin-bottom: 20px;">💬 Parent Messages</h2>';
             
-            // Sample messages
+            // Sample messages (placeholder - messaging isn't wired to real data yet)
             const messages = [
-                // [player message entry redacted for privacy]
-                // [player message entry redacted for privacy]
+                { from: "Player 1's Parent", player: "Player One", time: "2 hours ago", preview: "Thanks for the drill suggestions! He's been working on his timing..." },
+                { from: "Player 2's Parent", player: "Player Two", time: "1 day ago", preview: "Quick question about the focus on release point. Should we..." }
             ];
 
             messages.forEach(msg => {
@@ -2154,14 +2340,14 @@
                             ${assignedPlan.coachCue ? `
                             <div style="margin-bottom: 20px; padding: 15px; background: #e8f4f8; border-left: 4px solid #3498db; border-radius: 0 6px 6px 0;">
                                 <h4 style="color: #3498db; margin-bottom: 10px;">👨‍🏫 Coach's Guidance</h4>
-                                <pre style="white-space: pre-wrap; font-family: inherit; margin: 0; color: #2c3e50;">${assignedPlan.coachCue}</pre>
+                                <pre style="white-space: pre-wrap; font-family: inherit; margin: 0; color: #2c3e50;">${escapeHtml(assignedPlan.coachCue)}</pre>
                             </div>
                             ` : ''}
 
                             ${assignedPlan.parentCue ? `
                             <div style="margin-bottom: 20px; padding: 15px; background: #e8f5e9; border-left: 4px solid #27ae60; border-radius: 0 6px 6px 0;">
                                 <h4 style="color: #27ae60; margin-bottom: 10px;">👪 What You Can Do</h4>
-                                <pre style="white-space: pre-wrap; font-family: inherit; margin: 0; color: #2c3e50;">${assignedPlan.parentCue}</pre>
+                                <pre style="white-space: pre-wrap; font-family: inherit; margin: 0; color: #2c3e50;">${escapeHtml(assignedPlan.parentCue)}</pre>
                             </div>
                             ` : ''}
 
@@ -2171,7 +2357,7 @@
                                     ${assignedPlan.drills.map((drill, idx) => `
                                         <div class="drill-item">
                                             <input type="checkbox" id="drill${idx}" onchange="updateAdherence()">
-                                            <label for="drill${idx}">${drill}</label>
+                                            <label for="drill${idx}">${escapeHtml(drill)}</label>
                                         </div>
                                     `).join('')}
                                 </div>
@@ -2769,6 +2955,7 @@ Example:
                 assignedDate: new Date().toISOString(),
                 adherence: []
             };
+            saveState();
 
             // Show success message with plan summary
             const summary = `
@@ -2979,6 +3166,19 @@ Example:
                     </div>
                 </div>
 
+                <!-- Security -->
+                <div style="display: grid; grid-template-columns: 1fr; gap: 20px; margin-bottom: 30px;">
+                    <div class="player-card" style="border-top: 3px solid #3498db;">
+                        <h3 style="margin-bottom: 15px;">🔒 Security</h3>
+                        <p style="color: #7f8c8d; margin-bottom: 15px; font-size: 14px;">
+                            The coach password gates the Coach role at login. Access codes (shown in the roster below) gate each player's Parent view.
+                        </p>
+                        <button onclick="changeCoachPassword()" class="btn btn-secondary">
+                            🔑 Change Coach Password
+                        </button>
+                    </div>
+                </div>
+
                 <!-- Data Backup & Restore -->
                 <div style="display: grid; grid-template-columns: 1fr; gap: 20px; margin-bottom: 30px;">
                     <div class="player-card" style="border-top: 3px solid #10b981;">
@@ -3030,6 +3230,7 @@ Example:
                                     <th>#</th>
                                     <th>Player Name</th>
                                     <th>Stats</th>
+                                    <th>Access Code</th>
                                     <th>Parent Access</th>
                                     <th>Actions</th>
                                 </tr>
@@ -3039,7 +3240,7 @@ Example:
                                     const parentAccounts = appState.parentAccess.filter(
                                         p => p.playerNumber === player.number && p.status === 'approved'
                                     );
-                                    
+
                                     return `
                                         <tr>
                                             <td><strong>${player.number}</strong></td>
@@ -3048,10 +3249,16 @@ Example:
                                                 ${player.pa} PA, ${player.avg.toFixed(3)} AVG
                                             </td>
                                             <td>
+                                                <code style="font-weight: 600; letter-spacing: 1px;">${player.accessCode}</code><br>
+                                                <button class="btn btn-secondary" onclick="regenerateAccessCode(${player.number})" style="padding: 4px 8px; font-size: 11px; margin-top: 4px;">
+                                                    🔄 New Code
+                                                </button>
+                                            </td>
+                                            <td>
                                                 ${parentAccounts.length > 0 ? `
                                                     <div style="font-size: 12px;">
-                                                        ${parentAccounts.map(p => 
-                                                            `<div style="color: #27ae60; margin-bottom: 3px;">✓ ${p.parentName}</div>`
+                                                        ${parentAccounts.map(p =>
+                                                            `<div style="color: #27ae60; margin-bottom: 3px;">✓ ${escapeHtml(p.parentName)}</div>`
                                                         ).join('')}
                                                     </div>
                                                 ` : `
@@ -3094,14 +3301,14 @@ Example:
                                     const player = appState.players.find(p => p.number === parent.playerNumber);
                                     return `
                                         <tr>
-                                            <td>${parent.parentName}</td>
-                                            <td style="color: #7f8c8d; font-size: 13px;">${parent.parentEmail}</td>
+                                            <td>${escapeHtml(parent.parentName)}</td>
+                                            <td style="color: #7f8c8d; font-size: 13px;">${escapeHtml(parent.parentEmail)}</td>
                                             <td><strong>#${player.number} ${player.first} ${player.last}</strong></td>
                                             <td style="font-size: 12px; color: #7f8c8d;">
                                                 ${parent.approvedDate ? new Date(parent.approvedDate).toLocaleDateString() : 'N/A'}
                                             </td>
                                             <td>
-                                                <button class="btn" onclick="revokeParentAccess('${parent.parentEmail}', ${parent.playerNumber})" style="padding: 6px 12px; font-size: 12px; background: #e74c3c; color: white;">
+                                                <button class="btn" data-parent-email="${escapeHtml(parent.parentEmail)}" onclick="revokeParentAccess(this.dataset.parentEmail, ${parent.playerNumber})" style="padding: 6px 12px; font-size: 12px; background: #e74c3c; color: white;">
                                                     ✖️ Revoke Access
                                                 </button>
                                             </td>
@@ -3133,10 +3340,10 @@ Example:
                         <div style="display: flex; justify-content: space-between; align-items: start;">
                             <div style="flex: 1;">
                                 <div style="font-weight: bold; color: #2c3e50; margin-bottom: 5px;">
-                                    ${request.parentName}
+                                    ${escapeHtml(request.parentName)}
                                 </div>
                                 <div style="font-size: 13px; color: #7f8c8d; margin-bottom: 5px;">
-                                    📧 ${request.parentEmail}
+                                    📧 ${escapeHtml(request.parentEmail)}
                                 </div>
                                 <div style="font-size: 13px; color: #2c3e50;">
                                     Requesting access to: <strong>#${player.number} ${player.first} ${player.last}</strong>
@@ -3226,11 +3433,13 @@ Example:
                 bf: 0,
                 er: 0,
                 pitchK: 0,
-                pitchBB: 0
+                pitchBB: 0,
+                accessCode: generateAccessCode()
             };
 
             appState.players.push(newPlayer);
             appState.players.sort((a, b) => a.number - b.number);
+            saveState();
 
             // Regenerate signals
             generateFocusSignals();
@@ -3310,6 +3519,7 @@ Example:
                     parent.playerNumber = newNumber;
                 }
             });
+            saveState();
 
             generateFocusSignals();
             renderTeamManagement();
@@ -3342,6 +3552,7 @@ Example:
 
             // Remove plans
             delete appState.plans[playerNumber];
+            saveState();
 
             generateFocusSignals();
             renderTeamManagement();
@@ -3349,6 +3560,24 @@ Example:
             renderFocusQueue();
 
             alert(`${player.first} ${player.last} has been removed from the roster.`);
+        }
+
+        // Regenerate a player's parent access code (invalidates the old code for everyone)
+        window.regenerateAccessCode = function(playerNumber) {
+            const player = appState.players.find(p => p.number === playerNumber);
+            if (!player) return;
+
+            const confirmRegenerate = confirm(
+                `Generate a new access code for ${player.first} ${player.last}?\n\n` +
+                `The old code (${player.accessCode}) will stop working immediately for anyone still using it - ` +
+                `including any parent you haven't cut off on purpose. Share the new code with whoever should still have access.`
+            );
+            if (!confirmRegenerate) return;
+
+            player.accessCode = generateAccessCode();
+            saveState();
+            renderTeamManagement();
+            alert(`New access code for ${player.first} ${player.last}: ${player.accessCode}`);
         }
 
         // Open Invite Parent Modal
@@ -3424,6 +3653,7 @@ Example:
                 requestDate: new Date().toISOString(),
                 approvedDate: new Date().toISOString()
             });
+            saveState();
 
             renderTeamManagement();
             closeModal('messageModal');
@@ -3454,6 +3684,7 @@ Example:
 
             // Remove from pending
             appState.pendingParentRequests.splice(requestIdx, 1);
+            saveState();
 
             renderTeamManagement();
             alert(`Access approved for ${request.parentName}!`);
@@ -3475,6 +3706,7 @@ Example:
 
             // Remove from pending
             appState.pendingParentRequests.splice(requestIdx, 1);
+            saveState();
 
             renderTeamManagement();
             alert(`Access request denied.`);
@@ -3637,6 +3869,7 @@ Example:
 
             // Reset plans and signals
             appState.plans = {};
+            saveState();
             generateFocusSignals();
 
             // Update all views
@@ -3896,10 +4129,10 @@ Example:
 
             const player = appState.players.find(p => p.number === playerNumber);
             const confirmRevoke = confirm(
-                `Revoke parent access?\n\n` +
-                `Parent: ${parent.parentName}\n` +
-                `Child: ${player.first} ${player.last}\n\n` +
-                `They will no longer be able to log in or view this player's information.`
+                `Remove ${parent.parentName} from the known-parents list for ${player.first} ${player.last}?\n\n` +
+                `Note: this only removes their name from this list - it does NOT block them from logging in, ` +
+                `since login uses ${player.first}'s access code, not a per-person password. ` +
+                `To actually cut someone off, use "New Code" to give ${player.first} a fresh access code.`
             );
 
             if (!confirmRevoke) return;
@@ -3908,9 +4141,10 @@ Example:
             appState.parentAccess = appState.parentAccess.filter(
                 p => !(p.parentEmail === parentEmail && p.playerNumber === playerNumber)
             );
+            saveState();
 
             renderTeamManagement();
-            alert(`Access revoked for ${parent.parentName}.`);
+            alert(`${parent.parentName} removed from the list.`);
         }
 
         // Render Video Analysis
@@ -4201,8 +4435,8 @@ Example:
                 }
             }
             document.getElementById('currentVideoPlayer').innerHTML = `
-                ${assignmentText} • Uploaded by ${video.uploadedBy} • ${video.uploadDate.toLocaleDateString()}
-                ${video.description ? `<br><em>${video.description}</em>` : ''}
+                ${assignmentText} • Uploaded by ${escapeHtml(video.uploadedBy)} • ${video.uploadDate.toLocaleDateString()}
+                ${video.description ? `<br><em>${escapeHtml(video.description)}</em>` : ''}
             `;
             
             initializeVideoPlayer();
@@ -4537,7 +4771,7 @@ Example:
                     const roleIcon = comment.role === 'coach' ? '👨‍🏫' : 
                                     comment.role === 'parent' ? '👪' : '🏃';
                     
-                    textDiv.innerHTML = `<strong>${roleIcon} ${comment.user}:</strong> ${comment.text}`;
+                    textDiv.innerHTML = `<strong>${roleIcon} ${escapeHtml(comment.user)}:</strong> ${escapeHtml(comment.text)}`;
                     annotationLayer.appendChild(textDiv);
                 }
 
@@ -4571,10 +4805,10 @@ Example:
                 
                 div.innerHTML = `
                     <div class="comment-header">
-                        <span class="comment-user">${roleIcon} ${comment.user}</span>
+                        <span class="comment-user">${roleIcon} ${escapeHtml(comment.user)}</span>
                         <span class="comment-time">${formatTime(comment.time)}</span>
                     </div>
-                    <div class="comment-text">${comment.text}</div>
+                    <div class="comment-text">${escapeHtml(comment.text)}</div>
                     ${comment.type === 'segment' ? `<div style="font-size: 12px; color: #7f8c8d; margin-top: 5px;">📍 ${formatTime(comment.startTime)} - ${formatTime(comment.endTime)}</div>` : ''}
                 `;
 
@@ -4710,7 +4944,7 @@ Example:
                         <div style="margin-bottom: 8px;">
                             ${assignmentBadge}
                         </div>
-                        <div class="video-title">${video.name}</div>
+                        <div class="video-title">${escapeHtml(video.name)}</div>
                         <div class="video-meta">
                             ${video.comments.length} comment${video.comments.length !== 1 ? 's' : ''} • ${video.uploadDate.toLocaleDateString()}
                         </div>
@@ -4936,6 +5170,10 @@ Example:
 
         function exportAllData() {
             try {
+                // Make sure localStorage reflects the current in-memory state
+                // (covers the case where nothing has triggered a save yet)
+                saveState();
+
                 // Collect all data from localStorage
                 const backupData = {
                     version: '1.0',
@@ -4946,8 +5184,9 @@ Example:
                         seasons: localStorage.getItem('seasons'),
                         currentSeason: localStorage.getItem('currentSeason'),
                         parentAccess: localStorage.getItem('parentAccess'),
-                        focusSignals: localStorage.getItem('focusSignals'),
-                        developmentPlans: localStorage.getItem('developmentPlans')
+                        pendingParentRequests: localStorage.getItem('pendingParentRequests'),
+                        developmentPlans: localStorage.getItem('developmentPlans'),
+                        seasonHistory: localStorage.getItem('seasonHistory')
                     }
                 };
                 
