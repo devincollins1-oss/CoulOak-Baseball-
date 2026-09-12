@@ -925,11 +925,21 @@
                 </select>
             </div>
 
+            <div class="form-group" id="coachPasswordGroup" style="display: none;">
+                <label>Coach Password</label>
+                <input type="password" id="coachPassword" autocomplete="current-password">
+            </div>
+
             <div class="form-group" id="playerSelectGroup" style="display: none;">
                 <label>My child is...</label>
                 <select id="playerSelect">
                     <option value="">Select player</option>
                 </select>
+            </div>
+
+            <div class="form-group" id="parentAccessCodeGroup" style="display: none;">
+                <label>Access Code</label>
+                <input type="text" id="parentAccessCode" placeholder="Ask your coach for this code" autocomplete="off">
             </div>
 
             <button class="btn btn-primary" onclick="login()">Enter</button>
@@ -1154,6 +1164,55 @@
             }
         }
 
+        // ============================================
+        // AUTH (coach password + per-player access codes)
+        // ============================================
+        // NOTE: this is a client-side-only, backend-less app, so none of this
+        // is cryptographically secure against someone determined to read the
+        // page source — it exists to stop casual/accidental access, not a
+        // motivated attacker.
+
+        const COACH_PASSWORD_HASH_KEY = 'coachPasswordHash'; // deliberately NOT in STORAGE_KEYS/backups
+
+        async function hashText(text) {
+            const data = new TextEncoder().encode(text);
+            const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+            return Array.from(new Uint8Array(hashBuffer)).map(b => b.toString(16).padStart(2, '0')).join('');
+        }
+
+        function generateAccessCode() {
+            const chars = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'; // no 0/O/1/I/L - avoids look-alike mixups
+            let code = '';
+            for (let i = 0; i < 6; i++) {
+                code += chars[Math.floor(Math.random() * chars.length)];
+            }
+            return code;
+        }
+
+        window.changeCoachPassword = async function() {
+            const storedHash = localStorage.getItem(COACH_PASSWORD_HASH_KEY);
+
+            if (storedHash) {
+                const currentPassword = prompt('Enter your current coach password:');
+                if (!currentPassword) return;
+                if (await hashText(currentPassword) !== storedHash) {
+                    alert('Incorrect current password.');
+                    return;
+                }
+            }
+
+            const newPassword = prompt('Enter a new coach password:');
+            if (!newPassword) return;
+            const confirmPassword = prompt('Confirm new coach password:');
+            if (newPassword !== confirmPassword) {
+                alert('Passwords did not match - password was not changed.');
+                return;
+            }
+
+            localStorage.setItem(COACH_PASSWORD_HASH_KEY, await hashText(newPassword));
+            alert('Coach password updated.');
+        }
+
         // Sample data based on CSV structure
         const samplePlayers = [
             // [player roster entry redacted for privacy]
@@ -1176,29 +1235,84 @@
         // Restore any previously saved coach data (overrides sample data above if present)
         loadState();
 
+        // Ensure every player has an access code (covers sample data and older saved rosters)
+        let backfilledAccessCodes = false;
+        appState.players.forEach(player => {
+            if (!player.accessCode) {
+                player.accessCode = generateAccessCode();
+                backfilledAccessCodes = true;
+            }
+        });
+        if (backfilledAccessCodes) saveState();
+
         // Initialize season data
         initializeSeasonData();
 
         // Login
         document.getElementById('userRole').addEventListener('change', (e) => {
             const playerGroup = document.getElementById('playerSelectGroup');
+            const accessCodeGroup = document.getElementById('parentAccessCodeGroup');
+            const coachPasswordGroup = document.getElementById('coachPasswordGroup');
+
             if (e.target.value === 'parent') {
                 playerGroup.style.display = 'block';
+                accessCodeGroup.style.display = 'block';
+                coachPasswordGroup.style.display = 'none';
                 const select = document.getElementById('playerSelect');
                 select.innerHTML = '<option value="">Select player</option>';
                 appState.players.forEach(p => {
                     select.innerHTML += `<option value="${p.number}">#${p.number} ${p.first} ${p.last}</option>`;
                 });
+            } else if (e.target.value === 'coach') {
+                playerGroup.style.display = 'none';
+                accessCodeGroup.style.display = 'none';
+                coachPasswordGroup.style.display = 'block';
             } else {
                 playerGroup.style.display = 'none';
+                accessCodeGroup.style.display = 'none';
+                coachPasswordGroup.style.display = 'none';
             }
         });
 
-        function login() {
+        async function login() {
             const role = document.getElementById('userRole').value;
             if (!role) {
                 alert('Please select your role');
                 return;
+            }
+
+            if (role === 'coach') {
+                const enteredPassword = document.getElementById('coachPassword').value;
+                const storedHash = localStorage.getItem(COACH_PASSWORD_HASH_KEY);
+
+                if (!storedHash) {
+                    // First time on this device/browser: whoever is here sets the coach password
+                    const wantsSetup = confirm(
+                        'No coach password has been set on this device yet.\n\n' +
+                        'Set one now? Anyone who knows it will have full coach access.'
+                    );
+                    if (!wantsSetup) return;
+
+                    const newPassword = prompt('Enter a new coach password:');
+                    if (!newPassword) return;
+                    const confirmPassword = prompt('Confirm coach password:');
+                    if (newPassword !== confirmPassword) {
+                        alert('Passwords did not match - please try again.');
+                        return;
+                    }
+
+                    localStorage.setItem(COACH_PASSWORD_HASH_KEY, await hashText(newPassword));
+                    alert('Coach password set! Logging you in now.');
+                } else {
+                    if (!enteredPassword) {
+                        alert('Please enter the coach password');
+                        return;
+                    }
+                    if (await hashText(enteredPassword) !== storedHash) {
+                        alert('Incorrect coach password');
+                        return;
+                    }
+                }
             }
 
             if (role === 'parent') {
@@ -1207,44 +1321,20 @@
                     alert('Please select your child');
                     return;
                 }
-                
-                const player = appState.players.find(p => p.number == playerId);
-                
-                // In a real system, you'd check against actual parent email
-                // For demo, we'll simulate checking if parent has access
-                const hasAccess = appState.parentAccess.some(
-                    p => p.playerNumber == playerId && p.status === 'approved'
-                );
-                
-                if (!hasAccess && appState.parentAccess.length > 0) {
-                    // Show access request option
-                    const requestAccess = confirm(
-                        `Parent access not yet approved for ${player.first} ${player.last}.\n\n` +
-                        `Would you like to request access?\n\n` +
-                        `The coach will review your request.`
-                    );
-                    
-                    if (requestAccess) {
-                        // Simulate parent request
-                        const parentName = prompt('Enter your name:');
-                        const parentEmail = prompt('Enter your email:');
-                        
-                        if (parentName && parentEmail) {
-                            appState.pendingParentRequests.push({
-                                parentName: parentName,
-                                parentEmail: parentEmail.toLowerCase(),
-                                playerNumber: parseInt(playerId),
-                                requestDate: new Date().toISOString(),
-                                status: 'pending'
-                            });
-                            saveState();
 
-                            alert('Access request submitted! The coach will review your request shortly.');
-                        }
-                    }
+                const player = appState.players.find(p => p.number == playerId);
+                const enteredCode = document.getElementById('parentAccessCode').value.trim().toUpperCase();
+
+                if (!enteredCode) {
+                    alert('Please enter the access code your coach gave you');
                     return;
                 }
-                
+
+                if (enteredCode !== player.accessCode) {
+                    alert(`Incorrect access code for ${player.first} ${player.last}.\n\nAsk your coach for the current access code.`);
+                    return;
+                }
+
                 appState.currentPlayer = player;
             }
 
@@ -3043,6 +3133,19 @@ Example:
                     </div>
                 </div>
 
+                <!-- Security -->
+                <div style="display: grid; grid-template-columns: 1fr; gap: 20px; margin-bottom: 30px;">
+                    <div class="player-card" style="border-top: 3px solid #3498db;">
+                        <h3 style="margin-bottom: 15px;">🔒 Security</h3>
+                        <p style="color: #7f8c8d; margin-bottom: 15px; font-size: 14px;">
+                            The coach password gates the Coach role at login. Access codes (shown in the roster below) gate each player's Parent view.
+                        </p>
+                        <button onclick="changeCoachPassword()" class="btn btn-secondary">
+                            🔑 Change Coach Password
+                        </button>
+                    </div>
+                </div>
+
                 <!-- Data Backup & Restore -->
                 <div style="display: grid; grid-template-columns: 1fr; gap: 20px; margin-bottom: 30px;">
                     <div class="player-card" style="border-top: 3px solid #10b981;">
@@ -3094,6 +3197,7 @@ Example:
                                     <th>#</th>
                                     <th>Player Name</th>
                                     <th>Stats</th>
+                                    <th>Access Code</th>
                                     <th>Parent Access</th>
                                     <th>Actions</th>
                                 </tr>
@@ -3103,7 +3207,7 @@ Example:
                                     const parentAccounts = appState.parentAccess.filter(
                                         p => p.playerNumber === player.number && p.status === 'approved'
                                     );
-                                    
+
                                     return `
                                         <tr>
                                             <td><strong>${player.number}</strong></td>
@@ -3112,9 +3216,15 @@ Example:
                                                 ${player.pa} PA, ${player.avg.toFixed(3)} AVG
                                             </td>
                                             <td>
+                                                <code style="font-weight: 600; letter-spacing: 1px;">${player.accessCode}</code><br>
+                                                <button class="btn btn-secondary" onclick="regenerateAccessCode(${player.number})" style="padding: 4px 8px; font-size: 11px; margin-top: 4px;">
+                                                    🔄 New Code
+                                                </button>
+                                            </td>
+                                            <td>
                                                 ${parentAccounts.length > 0 ? `
                                                     <div style="font-size: 12px;">
-                                                        ${parentAccounts.map(p => 
+                                                        ${parentAccounts.map(p =>
                                                             `<div style="color: #27ae60; margin-bottom: 3px;">✓ ${p.parentName}</div>`
                                                         ).join('')}
                                                     </div>
@@ -3290,7 +3400,8 @@ Example:
                 bf: 0,
                 er: 0,
                 pitchK: 0,
-                pitchBB: 0
+                pitchBB: 0,
+                accessCode: generateAccessCode()
             };
 
             appState.players.push(newPlayer);
@@ -3416,6 +3527,24 @@ Example:
             renderFocusQueue();
 
             alert(`${player.first} ${player.last} has been removed from the roster.`);
+        }
+
+        // Regenerate a player's parent access code (invalidates the old code for everyone)
+        window.regenerateAccessCode = function(playerNumber) {
+            const player = appState.players.find(p => p.number === playerNumber);
+            if (!player) return;
+
+            const confirmRegenerate = confirm(
+                `Generate a new access code for ${player.first} ${player.last}?\n\n` +
+                `The old code (${player.accessCode}) will stop working immediately for anyone still using it - ` +
+                `including any parent you haven't cut off on purpose. Share the new code with whoever should still have access.`
+            );
+            if (!confirmRegenerate) return;
+
+            player.accessCode = generateAccessCode();
+            saveState();
+            renderTeamManagement();
+            alert(`New access code for ${player.first} ${player.last}: ${player.accessCode}`);
         }
 
         // Open Invite Parent Modal
@@ -3967,10 +4096,10 @@ Example:
 
             const player = appState.players.find(p => p.number === playerNumber);
             const confirmRevoke = confirm(
-                `Revoke parent access?\n\n` +
-                `Parent: ${parent.parentName}\n` +
-                `Child: ${player.first} ${player.last}\n\n` +
-                `They will no longer be able to log in or view this player's information.`
+                `Remove ${parent.parentName} from the known-parents list for ${player.first} ${player.last}?\n\n` +
+                `Note: this only removes their name from this list - it does NOT block them from logging in, ` +
+                `since login uses ${player.first}'s access code, not a per-person password. ` +
+                `To actually cut someone off, use "New Code" to give ${player.first} a fresh access code.`
             );
 
             if (!confirmRevoke) return;
@@ -3982,7 +4111,7 @@ Example:
             saveState();
 
             renderTeamManagement();
-            alert(`Access revoked for ${parent.parentName}.`);
+            alert(`${parent.parentName} removed from the list.`);
         }
 
         // Render Video Analysis
