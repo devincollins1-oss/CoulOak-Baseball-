@@ -1227,29 +1227,16 @@
             alert('Coach password updated.');
         }
 
-        // Sample data based on CSV structure
-        const samplePlayers = [
-            // [player roster entry redacted for privacy]
-            // [player roster entry redacted for privacy]
-            // [player roster entry redacted for privacy]
-            // [player roster entry redacted for privacy]
-            // [player roster entry redacted for privacy]
-            // [player roster entry redacted for privacy]
-            // [player roster entry redacted for privacy]
-            // [player roster entry redacted for privacy]
-            // [player roster entry redacted for privacy]
-            // [player roster entry redacted for privacy]
-            // [player roster entry redacted for privacy]
-            // [player roster entry redacted for privacy]
-            // [player roster entry redacted for privacy]
-        ];
+        // No roster ships in the source - a fresh browser starts empty and the
+        // coach adds players (Team Management -> Add Player) or imports a
+        // backup. Real player names/stats belong in localStorage or a backup
+        // file, never committed to source control (this repo is public).
+        appState.players = [];
 
-        appState.players = samplePlayers;
-
-        // Restore any previously saved coach data (overrides sample data above if present)
+        // Restore any previously saved coach data (overrides the empty roster above if present)
         loadState();
 
-        // Ensure every player has an access code (covers sample data and older saved rosters)
+        // Ensure every player has an access code (covers older saved rosters)
         let backfilledAccessCodes = false;
         appState.players.forEach(player => {
             if (!player.accessCode) {
@@ -1618,6 +1605,17 @@
 
         // Render Team Overview
         function renderTeamOverview() {
+            if (appState.players.length === 0) {
+                document.getElementById('teamStats').innerHTML = `
+                    <div class="player-card" style="text-align: center; padding: 40px;">
+                        <div style="font-size: 48px; margin-bottom: 15px;">⚾</div>
+                        <h3 style="margin-bottom: 10px;">No players yet</h3>
+                        <p style="color: #7f8c8d;">Add your roster in Team Management to get started.</p>
+                    </div>
+                `;
+                return;
+            }
+
             const totalPA = appState.players.reduce((sum, p) => sum + p.pa, 0);
             const totalK = appState.players.reduce((sum, p) => sum + p.k, 0);
             const totalBB = appState.players.reduce((sum, p) => sum + p.bb, 0);
