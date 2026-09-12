@@ -5151,17 +5151,212 @@ Example:
             });
         }
 
+        // ============================================
+        // GAMECHANGER CSV IMPORT
+        // ============================================
+
+        // Splits one CSV line into fields, respecting double-quoted fields
+        // that may contain commas (GameChanger quotes some glossary text).
+        function parseCSVLine(line) {
+            const fields = [];
+            let current = '';
+            let inQuotes = false;
+            for (let i = 0; i < line.length; i++) {
+                const c = line[i];
+                if (inQuotes) {
+                    if (c === '"' && line[i + 1] === '"') { current += '"'; i++; }
+                    else if (c === '"') { inQuotes = false; }
+                    else { current += c; }
+                } else if (c === '"') {
+                    inQuotes = true;
+                } else if (c === ',') {
+                    fields.push(current);
+                    current = '';
+                } else {
+                    current += c;
+                }
+            }
+            fields.push(current);
+            return fields;
+        }
+
+        // GameChanger stat cells use "-" for not-applicable and blank for zero;
+        // both should read as 0 rather than NaN.
+        function parseStatNumber(value) {
+            if (value === undefined || value === null) return 0;
+            const trimmed = String(value).trim();
+            if (trimmed === '' || trimmed === '-') return 0;
+            const n = parseFloat(trimmed);
+            return isNaN(n) ? 0 : n;
+        }
+
+        // Parses a GameChanger team stats export. The file has three merged
+        // sections (Batting / Pitching / Fielding) sharing column names like
+        // "BB", "SO", "H" - so columns are located by name *within* the
+        // correct section, using the category row to find each section's
+        // boundaries, rather than a single global name lookup.
+        function parseGameChangerCSV(text) {
+            const lines = text.split(/\r?\n/).filter(l => l.trim() !== '');
+            if (lines.length < 3) {
+                throw new Error('File has no data rows - expected a GameChanger team stats export.');
+            }
+
+            const categoryRow = parseCSVLine(lines[0]);
+            const headerRow = parseCSVLine(lines[1]).map(h => h.trim());
+
+            const pitchingStart = categoryRow.findIndex(c => c.trim() === 'Pitching');
+            const fieldingStart = categoryRow.findIndex(c => c.trim() === 'Fielding');
+            const battingEnd = pitchingStart >= 0 ? pitchingStart : headerRow.length;
+            const pitchingEnd = fieldingStart >= 0 ? fieldingStart : headerRow.length;
+
+            function findCol(name, start, end) {
+                for (let i = start; i < end; i++) {
+                    if (headerRow[i] === name) return i;
+                }
+                return -1;
+            }
+
+            const col = {
+                number: findCol('Number', 0, battingEnd),
+                last: findCol('Last', 0, battingEnd),
+                first: findCol('First', 0, battingEnd),
+                pa: findCol('PA', 0, battingEnd),
+                ab: findCol('AB', 0, battingEnd),
+                avg: findCol('AVG', 0, battingEnd),
+                h: findCol('H', 0, battingEnd),
+                bb: findCol('BB', 0, battingEnd),
+                k: findCol('SO', 0, battingEnd),
+                ip: findCol('IP', battingEnd, pitchingEnd),
+                bf: findCol('BF', battingEnd, pitchingEnd),
+                er: findCol('ER', battingEnd, pitchingEnd),
+                pitchBB: findCol('BB', battingEnd, pitchingEnd),
+                pitchK: findCol('SO', battingEnd, pitchingEnd)
+            };
+
+            const missingCols = Object.entries(col).filter(([, idx]) => idx === -1).map(([name]) => name);
+            if (missingCols.length > 0) {
+                throw new Error(`Could not find expected column(s): ${missingCols.join(', ')}. This may not be a GameChanger team stats export.`);
+            }
+
+            const players = [];
+            const skipped = [];
+
+            for (let i = 2; i < lines.length; i++) {
+                const row = parseCSVLine(lines[i]);
+                const last = (row[col.last] || '').trim();
+                const first = (row[col.first] || '').trim();
+
+                // Skips the Totals row, the Glossary row, and any stray blank rows
+                if (!first && !last) continue;
+
+                const numberRaw = (row[col.number] || '').trim();
+                const number = numberRaw ? parseInt(numberRaw, 10) : NaN;
+
+                if (!numberRaw || isNaN(number)) {
+                    skipped.push({ first, last, reason: 'no jersey number in the file' });
+                    continue;
+                }
+
+                players.push({
+                    number: number,
+                    last: last,
+                    first: first,
+                    pa: parseStatNumber(row[col.pa]),
+                    ab: parseStatNumber(row[col.ab]),
+                    avg: parseStatNumber(row[col.avg]),
+                    h: parseStatNumber(row[col.h]),
+                    bb: parseStatNumber(row[col.bb]),
+                    k: parseStatNumber(row[col.k]),
+                    ip: parseStatNumber(row[col.ip]),
+                    bf: parseStatNumber(row[col.bf]),
+                    er: parseStatNumber(row[col.er]),
+                    pitchBB: parseStatNumber(row[col.pitchBB]),
+                    pitchK: parseStatNumber(row[col.pitchK])
+                });
+            }
+
+            return { players, skipped };
+        }
+
         function handleFileUpload(file) {
-            document.getElementById('uploadStatus').innerHTML = `
-                <div class="player-card">
-                    <h3 style="color: #27ae60;">✓ CSV File Uploaded Successfully</h3>
-                    <p style="margin-top: 10px;">File: ${file.name}</p>
-                    <p style="color: #7f8c8d; margin-top: 5px;">Stats have been processed and focus signals generated.</p>
-                    <button class="btn btn-primary" style="margin-top: 15px;" onclick="document.querySelector('[data-tab=\\"focus-queue\\"]').click()">
-                        View Focus Queue →
-                    </button>
-                </div>
-            `;
+            const reader = new FileReader();
+
+            reader.onload = function(e) {
+                let parsed;
+                try {
+                    parsed = parseGameChangerCSV(e.target.result);
+                } catch (error) {
+                    document.getElementById('uploadStatus').innerHTML = `
+                        <div class="player-card" style="border-top: 3px solid #e74c3c;">
+                            <h3 style="color: #e74c3c;">✗ Could not import this file</h3>
+                            <p style="margin-top: 10px; color: #7f8c8d;">${escapeHtml(error.message)}</p>
+                        </div>
+                    `;
+                    return;
+                }
+
+                if (parsed.players.length === 0) {
+                    document.getElementById('uploadStatus').innerHTML = `
+                        <div class="player-card" style="border-top: 3px solid #e74c3c;">
+                            <h3 style="color: #e74c3c;">✗ No players found</h3>
+                            <p style="margin-top: 10px; color: #7f8c8d;">The file parsed, but no player rows with a jersey number were found.</p>
+                        </div>
+                    `;
+                    return;
+                }
+
+                // Update existing players (matched by jersey number, keeping their
+                // access code and any parent access intact) and add new ones.
+                let addedCount = 0;
+                let updatedCount = 0;
+
+                parsed.players.forEach(imported => {
+                    const existing = appState.players.find(p => p.number === imported.number);
+                    if (existing) {
+                        Object.assign(existing, imported);
+                        updatedCount++;
+                    } else {
+                        appState.players.push({ ...imported, accessCode: generateAccessCode() });
+                        addedCount++;
+                    }
+                });
+
+                appState.players.sort((a, b) => a.number - b.number);
+                generateFocusSignals();
+                saveState();
+                showCoachView();
+
+                const skippedHtml = parsed.skipped.length > 0 ? `
+                    <div style="background: #fef3c7; border-left: 4px solid #f59e0b; padding: 12px; border-radius: 4px; margin-top: 15px;">
+                        <strong style="color: #92400e;">⚠️ Skipped ${parsed.skipped.length} player${parsed.skipped.length !== 1 ? 's' : ''} with no jersey number in the file:</strong>
+                        <ul style="margin: 8px 0 0 20px; color: #92400e;">
+                            ${parsed.skipped.map(s => `<li>${escapeHtml(`${s.first} ${s.last}`.trim())}</li>`).join('')}
+                        </ul>
+                        <p style="color: #92400e; margin: 8px 0 0 0; font-size: 13px;">Add them manually with a jersey number in Team Management.</p>
+                    </div>
+                ` : '';
+
+                document.getElementById('uploadStatus').innerHTML = `
+                    <div class="player-card" style="border-top: 3px solid #27ae60;">
+                        <h3 style="color: #27ae60;">✓ Stats imported from ${escapeHtml(file.name)}</h3>
+                        <p style="margin-top: 10px;">${addedCount} player${addedCount !== 1 ? 's' : ''} added, ${updatedCount} player${updatedCount !== 1 ? 's' : ''} updated.</p>
+                        ${skippedHtml}
+                        <button class="btn btn-primary" style="margin-top: 15px;" onclick="document.querySelector('[data-tab=\\"focus-queue\\"]').click()">
+                            View Focus Queue →
+                        </button>
+                    </div>
+                `;
+            };
+
+            reader.onerror = function() {
+                document.getElementById('uploadStatus').innerHTML = `
+                    <div class="player-card" style="border-top: 3px solid #e74c3c;">
+                        <h3 style="color: #e74c3c;">✗ Error reading file</h3>
+                    </div>
+                `;
+            };
+
+            reader.readAsText(file);
         }
 
         // ============================================
