@@ -52,8 +52,10 @@
             margin-bottom: 20px;
             box-shadow: 0 4px 12px rgba(0,0,0,0.15);
             display: flex;
+            flex-wrap: wrap;
             justify-content: space-between;
             align-items: center;
+            gap: 12px;
         }
 
         .app-header h1 {
@@ -907,6 +909,20 @@
         tr:hover {
             background: #f8f9fa;
         }
+
+        @media (max-width: 480px) {
+            .app-header {
+                padding: 18px;
+            }
+
+            .app-header h1 {
+                font-size: 19px;
+            }
+
+            .user-info {
+                text-align: left;
+            }
+        }
     </style>
 </head>
 <body>
@@ -1617,13 +1633,17 @@
             }
 
             const totalPA = appState.players.reduce((sum, p) => sum + p.pa, 0);
+            const totalAB = appState.players.reduce((sum, p) => sum + p.ab, 0);
             const totalK = appState.players.reduce((sum, p) => sum + p.k, 0);
             const totalBB = appState.players.reduce((sum, p) => sum + p.bb, 0);
             const totalH = appState.players.reduce((sum, p) => sum + p.h, 0);
 
-            const teamAvg = (totalH / appState.players.reduce((sum, p) => sum + p.ab, 0)).toFixed(3);
-            const teamKRate = (totalK / totalPA * 100).toFixed(1);
-            const teamBBRate = (totalBB / totalPA * 100).toFixed(1);
+            const teamAvg = totalAB > 0 ? (totalH / totalAB).toFixed(3) : '0.000';
+            const teamKRate = totalPA > 0 ? (totalK / totalPA * 100).toFixed(1) : '0.0';
+            const teamBBRate = totalPA > 0 ? (totalBB / totalPA * 100).toFixed(1) : '0.0';
+            const playersNeedingAttention = new Set(
+                appState.focusSignals.filter(s => s.priority === 'high' || s.priority === 'watch').map(s => s.player.number)
+            ).size;
 
             document.getElementById('teamStats').innerHTML = `
                 <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px;">
@@ -1650,15 +1670,15 @@
                     </div>
                     <div class="player-card">
                         <h3 style="margin-bottom: 15px;">Focus Alerts</h3>
-                        <div class="stat-item ${appState.focusSignals.length > 3 ? 'flagged' : ''}">
+                        <div class="stat-item ${playersNeedingAttention > 3 ? 'flagged' : ''}">
                             <div class="stat-label">Players Needing Attention</div>
-                            <div class="stat-value ${appState.focusSignals.length > 3 ? 'bad' : ''}">${appState.focusSignals.length}</div>
+                            <div class="stat-value ${playersNeedingAttention > 3 ? 'bad' : ''}">${playersNeedingAttention}</div>
                         </div>
                     </div>
                 </div>
                 <div class="player-card" style="margin-top: 20px;">
-                    <h3>Last Uploaded Stats: Couloak Diesel 11U Fall 2025</h3>
-                    <p style="color: #7f8c8d; margin-top: 10px;">Data includes ${appState.players.length} players across 22 games</p>
+                    <h3>Current Season: ${getCurrentSeason().name}</h3>
+                    <p style="color: #7f8c8d; margin-top: 10px;">Data includes ${appState.players.length} player${appState.players.length !== 1 ? 's' : ''}</p>
                 </div>
             `;
         }
@@ -1790,6 +1810,7 @@
                                             <td style="padding: 12px; font-weight: bold;">${signal.player.number}</td>
                                             <td style="padding: 12px;">
                                                 <div style="font-weight: 600; color: #2c3e50;">${signal.player.first} ${signal.player.last}</div>
+                                                <div style="font-size: 11px; color: #7f8c8d; text-transform: capitalize;">${signal.category}</div>
                                             </td>
                                             <td style="padding: 12px;">
                                                 <span style="background: ${statusColor}; color: white; padding: 4px 10px; border-radius: 4px; font-size: 11px; font-weight: bold; white-space: nowrap;">
