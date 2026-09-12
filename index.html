@@ -1180,6 +1180,20 @@
             return Array.from(new Uint8Array(hashBuffer)).map(b => b.toString(16).padStart(2, '0')).join('');
         }
 
+        // Escape untrusted text before interpolating it into an innerHTML template
+        // string. Anything a parent or coach types (names, comments, custom drill/cue
+        // text) must go through this before it hits the DOM, or it can run as script
+        // in whoever views that data next.
+        function escapeHtml(str) {
+            if (str === null || str === undefined) return '';
+            return String(str)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
         function generateAccessCode() {
             const chars = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'; // no 0/O/1/I/L - avoids look-alike mixups
             let code = '';
@@ -2307,14 +2321,14 @@
                             ${assignedPlan.coachCue ? `
                             <div style="margin-bottom: 20px; padding: 15px; background: #e8f4f8; border-left: 4px solid #3498db; border-radius: 0 6px 6px 0;">
                                 <h4 style="color: #3498db; margin-bottom: 10px;">👨‍🏫 Coach's Guidance</h4>
-                                <pre style="white-space: pre-wrap; font-family: inherit; margin: 0; color: #2c3e50;">${assignedPlan.coachCue}</pre>
+                                <pre style="white-space: pre-wrap; font-family: inherit; margin: 0; color: #2c3e50;">${escapeHtml(assignedPlan.coachCue)}</pre>
                             </div>
                             ` : ''}
 
                             ${assignedPlan.parentCue ? `
                             <div style="margin-bottom: 20px; padding: 15px; background: #e8f5e9; border-left: 4px solid #27ae60; border-radius: 0 6px 6px 0;">
                                 <h4 style="color: #27ae60; margin-bottom: 10px;">👪 What You Can Do</h4>
-                                <pre style="white-space: pre-wrap; font-family: inherit; margin: 0; color: #2c3e50;">${assignedPlan.parentCue}</pre>
+                                <pre style="white-space: pre-wrap; font-family: inherit; margin: 0; color: #2c3e50;">${escapeHtml(assignedPlan.parentCue)}</pre>
                             </div>
                             ` : ''}
 
@@ -2324,7 +2338,7 @@
                                     ${assignedPlan.drills.map((drill, idx) => `
                                         <div class="drill-item">
                                             <input type="checkbox" id="drill${idx}" onchange="updateAdherence()">
-                                            <label for="drill${idx}">${drill}</label>
+                                            <label for="drill${idx}">${escapeHtml(drill)}</label>
                                         </div>
                                     `).join('')}
                                 </div>
@@ -3225,7 +3239,7 @@ Example:
                                                 ${parentAccounts.length > 0 ? `
                                                     <div style="font-size: 12px;">
                                                         ${parentAccounts.map(p =>
-                                                            `<div style="color: #27ae60; margin-bottom: 3px;">✓ ${p.parentName}</div>`
+                                                            `<div style="color: #27ae60; margin-bottom: 3px;">✓ ${escapeHtml(p.parentName)}</div>`
                                                         ).join('')}
                                                     </div>
                                                 ` : `
@@ -3268,14 +3282,14 @@ Example:
                                     const player = appState.players.find(p => p.number === parent.playerNumber);
                                     return `
                                         <tr>
-                                            <td>${parent.parentName}</td>
-                                            <td style="color: #7f8c8d; font-size: 13px;">${parent.parentEmail}</td>
+                                            <td>${escapeHtml(parent.parentName)}</td>
+                                            <td style="color: #7f8c8d; font-size: 13px;">${escapeHtml(parent.parentEmail)}</td>
                                             <td><strong>#${player.number} ${player.first} ${player.last}</strong></td>
                                             <td style="font-size: 12px; color: #7f8c8d;">
                                                 ${parent.approvedDate ? new Date(parent.approvedDate).toLocaleDateString() : 'N/A'}
                                             </td>
                                             <td>
-                                                <button class="btn" onclick="revokeParentAccess('${parent.parentEmail}', ${parent.playerNumber})" style="padding: 6px 12px; font-size: 12px; background: #e74c3c; color: white;">
+                                                <button class="btn" data-parent-email="${escapeHtml(parent.parentEmail)}" onclick="revokeParentAccess(this.dataset.parentEmail, ${parent.playerNumber})" style="padding: 6px 12px; font-size: 12px; background: #e74c3c; color: white;">
                                                     ✖️ Revoke Access
                                                 </button>
                                             </td>
@@ -3307,10 +3321,10 @@ Example:
                         <div style="display: flex; justify-content: space-between; align-items: start;">
                             <div style="flex: 1;">
                                 <div style="font-weight: bold; color: #2c3e50; margin-bottom: 5px;">
-                                    ${request.parentName}
+                                    ${escapeHtml(request.parentName)}
                                 </div>
                                 <div style="font-size: 13px; color: #7f8c8d; margin-bottom: 5px;">
-                                    📧 ${request.parentEmail}
+                                    📧 ${escapeHtml(request.parentEmail)}
                                 </div>
                                 <div style="font-size: 13px; color: #2c3e50;">
                                     Requesting access to: <strong>#${player.number} ${player.first} ${player.last}</strong>
@@ -4402,8 +4416,8 @@ Example:
                 }
             }
             document.getElementById('currentVideoPlayer').innerHTML = `
-                ${assignmentText} • Uploaded by ${video.uploadedBy} • ${video.uploadDate.toLocaleDateString()}
-                ${video.description ? `<br><em>${video.description}</em>` : ''}
+                ${assignmentText} • Uploaded by ${escapeHtml(video.uploadedBy)} • ${video.uploadDate.toLocaleDateString()}
+                ${video.description ? `<br><em>${escapeHtml(video.description)}</em>` : ''}
             `;
             
             initializeVideoPlayer();
@@ -4738,7 +4752,7 @@ Example:
                     const roleIcon = comment.role === 'coach' ? '👨‍🏫' : 
                                     comment.role === 'parent' ? '👪' : '🏃';
                     
-                    textDiv.innerHTML = `<strong>${roleIcon} ${comment.user}:</strong> ${comment.text}`;
+                    textDiv.innerHTML = `<strong>${roleIcon} ${escapeHtml(comment.user)}:</strong> ${escapeHtml(comment.text)}`;
                     annotationLayer.appendChild(textDiv);
                 }
 
@@ -4772,10 +4786,10 @@ Example:
                 
                 div.innerHTML = `
                     <div class="comment-header">
-                        <span class="comment-user">${roleIcon} ${comment.user}</span>
+                        <span class="comment-user">${roleIcon} ${escapeHtml(comment.user)}</span>
                         <span class="comment-time">${formatTime(comment.time)}</span>
                     </div>
-                    <div class="comment-text">${comment.text}</div>
+                    <div class="comment-text">${escapeHtml(comment.text)}</div>
                     ${comment.type === 'segment' ? `<div style="font-size: 12px; color: #7f8c8d; margin-top: 5px;">📍 ${formatTime(comment.startTime)} - ${formatTime(comment.endTime)}</div>` : ''}
                 `;
 
@@ -4911,7 +4925,7 @@ Example:
                         <div style="margin-bottom: 8px;">
                             ${assignmentBadge}
                         </div>
-                        <div class="video-title">${video.name}</div>
+                        <div class="video-title">${escapeHtml(video.name)}</div>
                         <div class="video-meta">
                             ${video.comments.length} comment${video.comments.length !== 1 ? 's' : ''} • ${video.uploadDate.toLocaleDateString()}
                         </div>
