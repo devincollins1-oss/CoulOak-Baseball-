@@ -813,6 +813,7 @@
             currentUser: null,
             currentRole: null,
             currentPlayer: null,
+            pendingSignalSource: null,
             players: [],
             focusSignals: [],
             messages: [],
@@ -1572,6 +1573,8 @@
                                         keyStatText = `Pitching K%: ${(signal.value * 100).toFixed(0)}%`;
                                     } else if (signal.metric === 'coach_flagged') {
                                         keyStatText = `🚩 Flagged by ${signal.flaggedBy || 'Coach'}`;
+                                    } else if (signal.metric === 'video_comment') {
+                                        keyStatText = `🎥 From video`;
                                     } else {
                                         keyStatText = `AVG: ${signal.player.avg.toFixed(3)}`;
                                     }
@@ -1632,9 +1635,15 @@
                 const categoryBadge = categoryBadgeInfo
                     ? `<span style="background: ${categoryBadgeInfo.color}; color: white; padding: 3px 8px; border-radius: 4px; font-size: 11px; margin-right: 8px;">${categoryBadgeInfo.icon} ${(FOCUS_CATEGORIES[signal.category] || signal.category).toUpperCase()}</span>`
                     : '';
-                const sourceBadge = signal.source === 'coach'
-                    ? `<span style="background: #ecf0f1; color: #2c3e50; padding: 3px 8px; border-radius: 4px; font-size: 11px;">🚩 Coach flagged</span>`
-                    : '';
+                let sourceBadge = '';
+                if (signal.source === 'coach') {
+                    sourceBadge = `<span style="background: #ecf0f1; color: #2c3e50; padding: 3px 8px; border-radius: 4px; font-size: 11px;">🚩 Coach flagged</span>`;
+                } else if (signal.source === 'video') {
+                    const sourceVideoExists = appState.videos.some(v => v.id === signal.sourceVideoId);
+                    sourceBadge = sourceVideoExists
+                        ? `<span style="background: #ecf0f1; color: #2c3e50; padding: 3px 8px; border-radius: 4px; font-size: 11px; cursor: pointer;" onclick="document.querySelector('[data-tab=\\'video-analysis\\']').click(); setTimeout(() => openVideo('coach', ${signal.sourceVideoId}), 50);">🎥 From video: ${escapeHtml(signal.sourceVideoName || 'video')}</span>`
+                        : `<span style="background: #ecf0f1; color: #2c3e50; padding: 3px 8px; border-radius: 4px; font-size: 11px;">🎥 From video (deleted)</span>`;
+                }
                 
                 html += `
                     <div class="focus-signal" id="signal-detail-${idx}" style="background: ${bgColor}; border-left-color: ${borderColor};">
@@ -2768,19 +2777,24 @@
         // from the athlete/parent - without waiting for a stat threshold to
         // trip. Unlike stat signals, these survive generateFocusSignals()
         // regenerating the stat-triggered ones.
-        window.openAddFocusSignalModal = function() {
+        // `prefill` is optional: { playerNumber, insight, source: 'video', videoId, videoName, commentId }.
+        // Used both for a coach flagging something from scratch and for promoting
+        // a video comment into a signal (see promoteCommentToSignal below).
+        window.openAddFocusSignalModal = function(prefill) {
             if (appState.players.length === 0) {
                 alert('Add players to the roster first.');
                 return;
             }
+            prefill = prefill || {};
+            appState.pendingSignalSource = prefill.source ? prefill : null;
 
             document.getElementById('messageModalContent').innerHTML = `
-                <h2 style="margin-bottom: 20px;">➕ Add Focus Signal</h2>
+                <h2 style="margin-bottom: 20px;">➕ ${prefill.source === 'video' ? 'Promote Comment to Focus Signal' : 'Add Focus Signal'}</h2>
 
                 <div class="form-group">
                     <label>Player</label>
                     <select id="newSignalPlayer">
-                        ${appState.players.map(p => `<option value="${p.number}">#${p.number} ${escapeHtml(p.first)} ${escapeHtml(p.last)}</option>`).join('')}
+                        ${appState.players.map(p => `<option value="${p.number}" ${p.number === prefill.playerNumber ? 'selected' : ''}>#${p.number} ${escapeHtml(p.first)} ${escapeHtml(p.last)}</option>`).join('')}
                     </select>
                 </div>
 
@@ -2802,7 +2816,7 @@
 
                 <div class="form-group">
                     <label>What did you notice?</label>
-                    <textarea id="newSignalInsight" placeholder="e.g., On film from Saturday's game, his glove-side elbow is flying open on contact pitches." style="min-height: 80px;"></textarea>
+                    <textarea id="newSignalInsight" placeholder="e.g., On film from Saturday's game, his glove-side elbow is flying open on contact pitches." style="min-height: 80px;">${escapeHtml(prefill.insight || '')}</textarea>
                 </div>
 
                 <div class="form-group">
@@ -2844,24 +2858,59 @@
                 return;
             }
 
+            const videoSource = appState.pendingSignalSource;
             const player = appState.players.find(p => p.number === playerNumber);
             appState.focusSignals.push({
                 player: player,
-                source: 'coach',
+                source: videoSource ? 'video' : 'coach',
                 category: category,
-                metric: 'coach_flagged',
+                metric: videoSource ? 'video_comment' : 'coach_flagged',
                 value: null,
                 priority: priority,
                 insight: insight,
                 tags: tags,
                 flaggedBy: appState.currentUser,
-                flaggedDate: new Date().toISOString()
+                flaggedDate: new Date().toISOString(),
+                sourceVideoId: videoSource ? videoSource.videoId : undefined,
+                sourceVideoName: videoSource ? videoSource.videoName : undefined
             });
+
+            // Mark the originating comment so its "Promote" button doesn't show twice
+            if (videoSource) {
+                const video = appState.videos.find(v => v.id === videoSource.videoId);
+                const comment = video && video.comments.find(c => c.id === videoSource.commentId);
+                if (comment) comment.promotedToSignal = true;
+            }
+            appState.pendingSignalSource = null;
+
             saveState();
 
             closeModal('messageModal');
             renderFocusQueue();
+            if (videoSource) renderVideoComments('coach');
             alert(`${player.first} ${player.last} added to the focus queue.`);
+        }
+
+        // Pulls a video comment's text into the Add Focus Signal modal so a
+        // coach can turn film review straight into a tracked, drill-backed
+        // focus item instead of it staying a dead-end comment.
+        window.promoteCommentToSignal = function(commentId) {
+            const video = appState.currentVideo;
+            if (!video) return;
+            const comment = video.comments.find(c => c.id === commentId);
+            if (!comment) return;
+
+            const playerNumber = typeof video.assignedTo === 'number' ? video.assignedTo : undefined;
+            const insight = `From video "${video.name}"${comment.timestamp ? ` at ${comment.timestamp}` : ''}: "${comment.text}"`;
+
+            openAddFocusSignalModal({
+                playerNumber: playerNumber,
+                insight: insight,
+                source: 'video',
+                videoId: video.id,
+                videoName: video.name,
+                commentId: comment.id
+            });
         }
 
         function assignPlan(signalIdx) {
@@ -4808,6 +4857,12 @@ Example:
             const sorted = [...video.comments].sort((a, b) => new Date(a.date) - new Date(b.date));
             listEl.innerHTML = sorted.map(comment => {
                 const roleIcon = comment.role === 'coach' ? '👨‍🏫' : comment.role === 'parent' ? '👪' : '🏃';
+                const alreadyPromoted = comment.promotedToSignal;
+                const promoteButton = scope === 'coach'
+                    ? (alreadyPromoted
+                        ? `<span style="font-size: 11px; color: #7f8c8d;">✓ On focus queue</span>`
+                        : `<button class="btn btn-secondary" style="padding: 4px 10px; font-size: 11px;" onclick="promoteCommentToSignal(${comment.id})">🎯 Promote to Focus Signal</button>`)
+                    : '';
                 return `
                     <div class="comment-item">
                         <div class="comment-header">
@@ -4816,6 +4871,7 @@ Example:
                         </div>
                         ${comment.timestamp ? `<div style="font-size: 12px; color: #7f8c8d; margin-bottom: 4px;">📍 at ${escapeHtml(comment.timestamp)}</div>` : ''}
                         <div class="comment-text">${escapeHtml(comment.text)}</div>
+                        ${promoteButton ? `<div style="margin-top: 8px;">${promoteButton}</div>` : ''}
                     </div>
                 `;
             }).join('');
