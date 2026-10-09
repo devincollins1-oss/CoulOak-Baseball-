@@ -731,6 +731,7 @@
                 <button class="nav-tab" data-tab="focus-areas">🎯 Focus Areas</button>
                 <button class="nav-tab" data-tab="this-week">📅 This Week's Focus</button>
                 <button class="nav-tab" data-tab="parent-videos">🎥 Videos</button>
+                <button class="nav-tab" data-tab="parent-checkin">📝 Check In</button>
                 <button class="nav-tab" data-tab="parent-messages">💬 Coach Messages</button>
             </div>
 
@@ -754,6 +755,11 @@
                 <div id="parentVideoContent"></div>
             </div>
 
+            <!-- Check In Tab -->
+            <div class="tab-content" id="parent-checkin">
+                <div id="parentCheckInContent"></div>
+            </div>
+
             <!-- Messages Tab -->
             <div class="tab-content" id="parent-messages">
                 <div id="parentMessagesContent"></div>
@@ -766,6 +772,7 @@
                 <button class="nav-tab active" data-tab="my-stats">📊 My Stats</button>
                 <button class="nav-tab" data-tab="my-focus">🎯 My Focus</button>
                 <button class="nav-tab" data-tab="athlete-videos">🎥 Videos</button>
+                <button class="nav-tab" data-tab="athlete-checkin">📝 Check In</button>
             </div>
 
             <!-- My Stats Tab -->
@@ -781,6 +788,11 @@
             <!-- Videos Tab -->
             <div class="tab-content" id="athlete-videos">
                 <div id="athleteVideoContent"></div>
+            </div>
+
+            <!-- Check In Tab -->
+            <div class="tab-content" id="athlete-checkin">
+                <div id="athleteCheckInContent"></div>
             </div>
         </div>
     </div>
@@ -1146,6 +1158,7 @@
             renderParentFocusAreas();
             renderWeeklyFocus();
             renderParentVideos();
+            renderCheckIn('parent');
             renderParentMessages();
         }
 
@@ -1154,6 +1167,7 @@
             renderAthleteStats();
             renderAthleteFocus();
             renderAthleteVideos();
+            renderCheckIn('athlete');
         }
 
         // Generate Focus Signals
@@ -1575,6 +1589,8 @@
                                         keyStatText = `🚩 Flagged by ${signal.flaggedBy || 'Coach'}`;
                                     } else if (signal.metric === 'video_comment') {
                                         keyStatText = `🎥 From video`;
+                                    } else if (signal.metric === 'check_in') {
+                                        keyStatText = signal.source === 'athlete' ? `🙋 Self check-in` : `👪 Parent check-in`;
                                     } else {
                                         keyStatText = `AVG: ${signal.player.avg.toFixed(3)}`;
                                     }
@@ -1643,6 +1659,10 @@
                     sourceBadge = sourceVideoExists
                         ? `<span style="background: #ecf0f1; color: #2c3e50; padding: 3px 8px; border-radius: 4px; font-size: 11px; cursor: pointer;" onclick="document.querySelector('[data-tab=\\'video-analysis\\']').click(); setTimeout(() => openVideo('coach', ${signal.sourceVideoId}), 50);">🎥 From video: ${escapeHtml(signal.sourceVideoName || 'video')}</span>`
                         : `<span style="background: #ecf0f1; color: #2c3e50; padding: 3px 8px; border-radius: 4px; font-size: 11px;">🎥 From video (deleted)</span>`;
+                } else if (signal.source === 'athlete') {
+                    sourceBadge = `<span style="background: #ecf0f1; color: #2c3e50; padding: 3px 8px; border-radius: 4px; font-size: 11px;">🙋 Athlete check-in</span>`;
+                } else if (signal.source === 'parent') {
+                    sourceBadge = `<span style="background: #ecf0f1; color: #2c3e50; padding: 3px 8px; border-radius: 4px; font-size: 11px;">👪 Parent check-in</span>`;
                 }
                 
                 html += `
@@ -1664,6 +1684,8 @@
                                       signal.metric === 'hitting_performing_well' ? `Hitting: ${signal.player.pa} PA, ${signal.player.avg.toFixed(3)} AVG` :
                                       signal.metric === 'pitching_performing_well' ? `Pitching: ${signal.player.bf} BF, ${signal.player.ip} IP` :
                                       signal.metric === 'coach_flagged' ? `Flagged by ${escapeHtml(signal.flaggedBy || 'Coach')} on ${new Date(signal.flaggedDate).toLocaleDateString()}` :
+                                      signal.metric === 'video_comment' ? `From video review, ${new Date(signal.flaggedDate).toLocaleDateString()}` :
+                                      signal.metric === 'check_in' ? `Self-reported ${new Date(signal.flaggedDate).toLocaleDateString()}` :
                                       `PA: ${signal.player.pa}, AVG: ${signal.player.avg.toFixed(3)}`}
                                 </div>
                             </div>
@@ -2398,6 +2420,124 @@
             `;
         }
 
+        // ============================================
+        // SELF-REPORT CHECK-IN (athlete and parent)
+        // ============================================
+        // A quick, structured check-in that feeds the focus queue directly -
+        // a third kind of human input alongside a coach's manual flag and a
+        // promoted video comment. Each new check-in replaces that player's
+        // previous one from the same source (athlete vs. parent are tracked
+        // separately) rather than piling up, since it reports current state,
+        // not a one-off event like the other two sources.
+
+        function renderCheckIn(scope) {
+            const player = appState.currentPlayer;
+            const isAthlete = scope === 'athlete';
+            const container = document.getElementById(`${scope}CheckInContent`);
+
+            container.innerHTML = `
+                <div class="player-card">
+                    <h2 style="margin-bottom: 10px;">📝 ${isAthlete ? 'How are you feeling?' : `How's ${player.first} doing?`}</h2>
+                    <p style="color: #7f8c8d; margin-bottom: 20px; font-size: 14px;">
+                        ${isAthlete
+                            ? 'A quick check-in after practice or a game. Your coach will see this.'
+                            : `Noticed something about ${player.first} - confidence, soreness, anything else? This goes straight to the coach.`}
+                    </p>
+
+                    <div class="form-group">
+                        <label>${isAthlete ? 'How did you feel out there?' : 'How did they seem, confidence-wise?'}</label>
+                        <select id="${scope}CheckInConfidence">
+                            <option value="confident">${isAthlete ? "I felt really confident" : 'Confident / upbeat'}</option>
+                            <option value="okay" selected>${isAthlete ? 'I felt okay' : 'About normal'}</option>
+                            <option value="struggled">${isAthlete ? 'I struggled today' : 'Seemed to struggle / down on themselves'}</option>
+                        </select>
+                    </div>
+
+                    <div class="form-group">
+                        <label>${isAthlete ? "How's your body feeling?" : "How's their body/arm feeling?"}</label>
+                        <select id="${scope}CheckInSoreness">
+                            <option value="good" selected>Feeling great</option>
+                            <option value="sore">A little sore or tired</option>
+                            <option value="hurt">Something's bothering me (sore, hurts, won't go away)</option>
+                        </select>
+                    </div>
+
+                    <div class="form-group">
+                        <label>What felt good? (optional)</label>
+                        <textarea id="${scope}CheckInGood" placeholder="${isAthlete ? 'e.g., My timing felt really good today' : 'e.g., Looked relaxed at the plate'}"></textarea>
+                    </div>
+
+                    <div class="form-group">
+                        <label>What felt off or hard? (optional)</label>
+                        <textarea id="${scope}CheckInOff" placeholder="${isAthlete ? "e.g., I couldn't pick up the ball out of his hand" : 'e.g., Mentioned their shoulder after throwing'}"></textarea>
+                    </div>
+
+                    <button class="btn btn-success" onclick="submitCheckIn('${scope}')">✓ Send Check-In</button>
+
+                    <div id="${scope}CheckInStatus" style="margin-top: 15px;"></div>
+                </div>
+            `;
+        }
+
+        window.submitCheckIn = function(scope) {
+            const player = appState.currentPlayer;
+            const confidence = document.getElementById(`${scope}CheckInConfidence`).value;
+            const soreness = document.getElementById(`${scope}CheckInSoreness`).value;
+            const feltGood = document.getElementById(`${scope}CheckInGood`).value.trim();
+            const feltOff = document.getElementById(`${scope}CheckInOff`).value.trim();
+
+            let priority = 'good';
+            let category = 'mental';
+            let tags = ['confidence'];
+
+            if (soreness === 'hurt') {
+                priority = 'high';
+                category = 'conditioning';
+                tags = ['recovery'];
+            } else if (confidence === 'struggled') {
+                priority = 'high';
+                category = 'mental';
+                tags = ['confidence', 'resilience'];
+            } else if (soreness === 'sore') {
+                priority = 'watch';
+                category = 'conditioning';
+                tags = ['recovery'];
+            } else if (confidence === 'okay' || feltOff) {
+                priority = 'watch';
+                category = 'mental';
+                tags = ['confidence'];
+            }
+
+            const confidenceLabel = { confident: 'felt confident', okay: 'felt okay', struggled: 'struggled' }[confidence];
+            const sorenessLabel = { good: 'feeling great physically', sore: 'a little sore/tired', hurt: 'something physically bothering them' }[soreness];
+            const who = scope === 'athlete' ? player.first : `${player.first} (per parent)`;
+            let insight = `Check-in: ${who} ${confidenceLabel}, ${sorenessLabel}.`;
+            if (feltGood) insight += ` Felt good: ${feltGood}.`;
+            if (feltOff) insight += ` Felt off: ${feltOff}.`;
+
+            // Replace this player's previous check-in from the same source rather than stacking duplicates
+            appState.focusSignals = appState.focusSignals.filter(s => !(s.source === scope && s.player.number === player.number));
+            appState.focusSignals.push({
+                player: player,
+                source: scope,
+                category: category,
+                metric: 'check_in',
+                value: null,
+                priority: priority,
+                insight: insight,
+                tags: tags,
+                flaggedBy: appState.currentUser,
+                flaggedDate: new Date().toISOString()
+            });
+            saveState();
+
+            document.getElementById(`${scope}CheckInStatus`).innerHTML = `
+                <div style="background: #e8f5e9; padding: 12px; border-radius: 6px; color: #27ae60; font-size: 14px;">
+                    ✓ Sent to your coach.
+                </div>
+            `;
+        }
+
         // Render Parent Messages
         function renderParentMessages() {
             const player = appState.currentPlayer;
@@ -2735,6 +2875,16 @@
                 ],
                 parentSay: ['Your first step looked explosive', 'Nice burst out of the box', 'You got there fast'],
                 parentAvoid: ['You need to run faster', "You're too slow down the line", 'Hustle more']
+            },
+            recovery: {
+                category: 'conditioning',
+                drills: [
+                    'Full rest day - no throwing or hitting',
+                    'Light stretching and foam rolling (10 min)',
+                    'Extra sleep and hydration tonight - no screens 30 min before bed'
+                ],
+                parentSay: ["I'm glad you told me how you're feeling", 'Resting today is the smart move', "Your body will thank you for this"],
+                parentAvoid: ['Just push through it', "It's probably nothing", 'One more rep won\'t hurt']
             }
         };
 
