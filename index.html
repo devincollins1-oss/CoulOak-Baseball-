@@ -632,6 +632,7 @@
                     <option value="">Select your role</option>
                     <option value="coach">Coach</option>
                     <option value="parent">Parent</option>
+                    <option value="athlete">Athlete</option>
                 </select>
             </div>
 
@@ -641,7 +642,7 @@
             </div>
 
             <div class="form-group" id="playerSelectGroup" style="display: none;">
-                <label>My child is...</label>
+                <label id="playerSelectLabel">My child is...</label>
                 <select id="playerSelect">
                     <option value="">Select player</option>
                 </select>
@@ -758,6 +759,30 @@
                 <div id="parentMessagesContent"></div>
             </div>
         </div>
+
+        <!-- Athlete View -->
+        <div id="athleteView" style="display: none;">
+            <div class="nav-tabs">
+                <button class="nav-tab active" data-tab="my-stats">📊 My Stats</button>
+                <button class="nav-tab" data-tab="my-focus">🎯 My Focus</button>
+                <button class="nav-tab" data-tab="athlete-videos">🎥 Videos</button>
+            </div>
+
+            <!-- My Stats Tab -->
+            <div class="tab-content active" id="my-stats">
+                <div id="athleteStatsContent"></div>
+            </div>
+
+            <!-- My Focus Tab -->
+            <div class="tab-content" id="my-focus">
+                <div id="athleteFocusContent"></div>
+            </div>
+
+            <!-- Videos Tab -->
+            <div class="tab-content" id="athlete-videos">
+                <div id="athleteVideoContent"></div>
+            </div>
+        </div>
     </div>
 
     <!-- Assign Plan Modal -->
@@ -823,11 +848,12 @@
             parentAccess: 'parentAccess',
             plans: 'developmentPlans',
             pendingParentRequests: 'pendingParentRequests',
-            videos: 'videos'
+            videos: 'videos',
+            focusSignals: 'focusSignals'
         };
 
         // Persist the coach-editable parts of appState. Call after any
-        // mutation to players/seasons/parentAccess/plans/pendingParentRequests/videos.
+        // mutation to players/seasons/parentAccess/plans/pendingParentRequests/videos/focusSignals.
         function saveState() {
             try {
                 localStorage.setItem(STORAGE_KEYS.players, JSON.stringify(appState.players));
@@ -838,6 +864,7 @@
                 localStorage.setItem(STORAGE_KEYS.plans, JSON.stringify(appState.plans));
                 localStorage.setItem(STORAGE_KEYS.pendingParentRequests, JSON.stringify(appState.pendingParentRequests));
                 localStorage.setItem(STORAGE_KEYS.videos, JSON.stringify(appState.videos));
+                localStorage.setItem(STORAGE_KEYS.focusSignals, JSON.stringify(appState.focusSignals));
             } catch (error) {
                 console.error('Save error:', error);
             }
@@ -870,6 +897,19 @@
 
                 const storedVideos = localStorage.getItem(STORAGE_KEYS.videos);
                 if (storedVideos) appState.videos = JSON.parse(storedVideos);
+
+                const storedFocusSignals = localStorage.getItem(STORAGE_KEYS.focusSignals);
+                if (storedFocusSignals) {
+                    appState.focusSignals = JSON.parse(storedFocusSignals);
+                    // Each signal's embedded player is a snapshot after JSON
+                    // round-tripping, not a live reference - repoint it at the
+                    // real player object so later edits (name, number) show up
+                    // instead of the signal silently going stale.
+                    appState.focusSignals.forEach(signal => {
+                        const livePlayer = appState.players.find(p => p.number === signal.player.number);
+                        if (livePlayer) signal.player = livePlayer;
+                    });
+                }
             } catch (error) {
                 console.error('Load error:', error);
             }
@@ -963,11 +1003,13 @@
         // Login
         document.getElementById('userRole').addEventListener('change', (e) => {
             const playerGroup = document.getElementById('playerSelectGroup');
+            const playerLabel = document.getElementById('playerSelectLabel');
             const accessCodeGroup = document.getElementById('parentAccessCodeGroup');
             const coachPasswordGroup = document.getElementById('coachPasswordGroup');
 
-            if (e.target.value === 'parent') {
+            if (e.target.value === 'parent' || e.target.value === 'athlete') {
                 playerGroup.style.display = 'block';
+                playerLabel.textContent = e.target.value === 'athlete' ? 'I am...' : 'My child is...';
                 accessCodeGroup.style.display = 'block';
                 coachPasswordGroup.style.display = 'none';
                 const select = document.getElementById('playerSelect');
@@ -1027,10 +1069,10 @@
                 }
             }
 
-            if (role === 'parent') {
+            if (role === 'parent' || role === 'athlete') {
                 const playerId = document.getElementById('playerSelect').value;
                 if (!playerId) {
-                    alert('Please select your child');
+                    alert(role === 'athlete' ? 'Please select your name' : 'Please select your child');
                     return;
                 }
 
@@ -1051,17 +1093,21 @@
             }
 
             appState.currentRole = role;
-            appState.currentUser = role === 'coach' ? 'Coach' : `${appState.currentPlayer.first}'s Parent`;
+            appState.currentUser = role === 'coach' ? 'Coach' :
+                role === 'athlete' ? appState.currentPlayer.first :
+                `${appState.currentPlayer.first}'s Parent`;
 
             document.getElementById('loginScreen').style.display = 'none';
             document.getElementById('appContainer').style.display = 'block';
             document.getElementById('userRoleDisplay').textContent = `Logged in as: ${appState.currentUser}`;
-            
+
             // Update season display
             updateSeasonDisplay();
 
             if (role === 'coach') {
                 showCoachView();
+            } else if (role === 'athlete') {
+                showAthleteView();
             } else {
                 showParentView();
             }
@@ -1102,24 +1148,37 @@
             renderParentMessages();
         }
 
+        function showAthleteView() {
+            document.getElementById('athleteView').style.display = 'block';
+            renderAthleteStats();
+            renderAthleteFocus();
+            renderAthleteVideos();
+        }
+
         // Generate Focus Signals
+        // Rebuilds the stat-triggered signals from current player stats. Signals
+        // from any other source (coach manual-flag, future video/athlete/parent
+        // input) are left untouched - they aren't derivable from stats, so they
+        // can't be regenerated, only preserved.
         function generateFocusSignals() {
-            appState.focusSignals = [];
+            const preserved = appState.focusSignals.filter(s => s.source && s.source !== 'stat');
+            const statSignals = [];
 
             appState.players.forEach(player => {
                 const hittingSignals = [];
                 const pitchingSignals = [];
-                
+
                 // Hitting Analysis
                 if (player.pa > 0) {
                     const kRate = player.k / player.pa;
                     const bbRate = player.bb / player.pa;
                     const avg = player.avg;
-                    
+
                     // K Rate Check
                     if (kRate > 0.30) {
                         hittingSignals.push({
                             player: player,
+                            source: 'stat',
                             category: 'hitting',
                             metric: 'K_rate_hitting',
                             value: kRate,
@@ -1133,6 +1192,7 @@
                     if (bbRate < 0.08 && player.pa > 20) {
                         hittingSignals.push({
                             player: player,
+                            source: 'stat',
                             category: 'hitting',
                             metric: 'BB_rate_hitting_low',
                             value: bbRate,
@@ -1141,11 +1201,12 @@
                             tags: ['pitch selection', 'approach']
                         });
                     }
-                    
+
                     // AVG Check - if struggling
                     if (avg < 0.250 && player.pa > 15) {
                         hittingSignals.push({
                             player: player,
+                            source: 'stat',
                             category: 'hitting',
                             metric: 'AVG_low',
                             value: avg,
@@ -1154,7 +1215,7 @@
                             tags: ['contact point', 'hand path', 'approach']
                         });
                     }
-                    
+
                     // If no hitting issues, create positive hitting signal
                     if (hittingSignals.length === 0) {
                         hittingSignals.push(generatePositiveHittingSignal(player));
@@ -1165,11 +1226,12 @@
                 if (player.bf > 10) {
                     const pitchBBRate = player.pitchBB / player.bf;
                     const pitchKRate = player.pitchK / player.bf;
-                    
+
                     // BB Rate Check - PITCHING (high walks is bad)
                     if (pitchBBRate > 0.15) {
                         pitchingSignals.push({
                             player: player,
+                            source: 'stat',
                             category: 'pitching',
                             metric: 'BB_rate_pitching_high',
                             value: pitchBBRate,
@@ -1178,11 +1240,12 @@
                             tags: ['release point', 'tempo', 'balance']
                         });
                     }
-                    
+
                     // K Rate Check - PITCHING (too low is bad)
                     if (pitchKRate < 0.12 && player.bf > 20) {
                         pitchingSignals.push({
                             player: player,
+                            source: 'stat',
                             category: 'pitching',
                             metric: 'K_rate_pitching_low',
                             value: pitchKRate,
@@ -1191,7 +1254,7 @@
                             tags: ['arm path', 'control', 'tempo']
                         });
                     }
-                    
+
                     // If no pitching issues, create positive pitching signal
                     if (pitchingSignals.length === 0) {
                         pitchingSignals.push(generatePositivePitchingSignal(player));
@@ -1203,24 +1266,26 @@
                 if (hittingSignals.length > 0 && pitchingSignals.length > 0) {
                     // Add highest priority hitting signal
                     const highPriorityHitting = hittingSignals.find(s => s.priority === 'high');
-                    appState.focusSignals.push(highPriorityHitting || hittingSignals[0]);
-                    
+                    statSignals.push(highPriorityHitting || hittingSignals[0]);
+
                     // Add highest priority pitching signal
                     const highPriorityPitching = pitchingSignals.find(s => s.priority === 'high');
-                    appState.focusSignals.push(highPriorityPitching || pitchingSignals[0]);
+                    statSignals.push(highPriorityPitching || pitchingSignals[0]);
                 } else if (hittingSignals.length > 0) {
                     // Only hitting stats available
                     const highPriority = hittingSignals.find(s => s.priority === 'high');
-                    appState.focusSignals.push(highPriority || hittingSignals[0]);
+                    statSignals.push(highPriority || hittingSignals[0]);
                 } else if (pitchingSignals.length > 0) {
                     // Only pitching stats available
                     const highPriority = pitchingSignals.find(s => s.priority === 'high');
-                    appState.focusSignals.push(highPriority || pitchingSignals[0]);
+                    statSignals.push(highPriority || pitchingSignals[0]);
                 } else {
                     // No stats - create generic positive signal
-                    appState.focusSignals.push(generateGenericPositiveSignal(player));
+                    statSignals.push(generateGenericPositiveSignal(player));
                 }
             });
+
+            appState.focusSignals = [...preserved, ...statSignals];
 
             // Sort by priority, but keep player's signals together
             appState.focusSignals.sort((a, b) => {
@@ -1234,6 +1299,8 @@
                 }
                 return a.player.number - b.player.number;
             });
+
+            saveState();
         }
 
         // Generate Positive Hitting Signal
@@ -1262,6 +1329,7 @@
             
             return {
                 player: player,
+                source: 'stat',
                 category: 'hitting',
                 metric: 'hitting_performing_well',
                 value: null,
@@ -1293,6 +1361,7 @@
             
             return {
                 player: player,
+                source: 'stat',
                 category: 'pitching',
                 metric: 'pitching_performing_well',
                 value: null,
@@ -1306,6 +1375,7 @@
         function generateGenericPositiveSignal(player) {
             return {
                 player: player,
+                source: 'stat',
                 category: 'general',
                 metric: 'performing_well',
                 value: null,
@@ -1398,8 +1468,11 @@
                 .slice(0, 8);
             
             let html = `
-                <h2 style="margin-bottom: 20px; color: #2c3e50;">🎯 Focus Queue</h2>
-                
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; flex-wrap: wrap; gap: 10px;">
+                    <h2 style="color: #2c3e50; margin: 0;">🎯 Focus Queue</h2>
+                    <button class="btn btn-success" onclick="openAddFocusSignalModal()">➕ Add Focus Signal</button>
+                </div>
+
                 <!-- Team-Wide Focus Dashboard -->
                 <div style="background: white; border-radius: 8px; padding: 25px; margin-bottom: 25px; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">
                     <h3 style="margin-bottom: 20px; color: #2c3e50;">📊 Team-Wide Focus Analysis</h3>
@@ -1497,6 +1570,8 @@
                                         keyStatText = `Pitching BB%: ${(signal.value * 100).toFixed(0)}%`;
                                     } else if (signal.metric === 'K_rate_pitching_low') {
                                         keyStatText = `Pitching K%: ${(signal.value * 100).toFixed(0)}%`;
+                                    } else if (signal.metric === 'coach_flagged') {
+                                        keyStatText = `🚩 Flagged by ${signal.flaggedBy || 'Coach'}`;
                                     } else {
                                         keyStatText = `AVG: ${signal.player.avg.toFixed(3)}`;
                                     }
@@ -1546,11 +1621,20 @@
                 const bgColor = isPositive ? '#e8f5e9' : (signal.priority === 'high' ? '#ffe6e6' : '#fff9e6');
                 const borderColor = isPositive ? '#27ae60' : (signal.priority === 'high' ? '#e74c3c' : '#f39c12');
                 
-                const categoryBadge = signal.category === 'hitting' ? 
-                    '<span style="background: #3498db; color: white; padding: 3px 8px; border-radius: 4px; font-size: 11px; margin-right: 8px;">⚾ HITTING</span>' :
-                    signal.category === 'pitching' ?
-                    '<span style="background: #9b59b6; color: white; padding: 3px 8px; border-radius: 4px; font-size: 11px; margin-right: 8px;">🥎 PITCHING</span>' :
-                    '';
+                const categoryBadgeInfo = {
+                    hitting: { icon: '⚾', color: '#3498db' },
+                    pitching: { icon: '🥎', color: '#9b59b6' },
+                    fielding: { icon: '🧤', color: '#16a085' },
+                    baserunning: { icon: '👟', color: '#e67e22' },
+                    mental: { icon: '🧠', color: '#8e44ad' },
+                    conditioning: { icon: '💪', color: '#2c3e50' }
+                }[signal.category];
+                const categoryBadge = categoryBadgeInfo
+                    ? `<span style="background: ${categoryBadgeInfo.color}; color: white; padding: 3px 8px; border-radius: 4px; font-size: 11px; margin-right: 8px;">${categoryBadgeInfo.icon} ${(FOCUS_CATEGORIES[signal.category] || signal.category).toUpperCase()}</span>`
+                    : '';
+                const sourceBadge = signal.source === 'coach'
+                    ? `<span style="background: #ecf0f1; color: #2c3e50; padding: 3px 8px; border-radius: 4px; font-size: 11px;">🚩 Coach flagged</span>`
+                    : '';
                 
                 html += `
                     <div class="focus-signal" id="signal-detail-${idx}" style="background: ${bgColor}; border-left-color: ${borderColor};">
@@ -1560,16 +1644,17 @@
                                     ${isPositive ? '✓ ' : ''}${signal.player.first} ${signal.player.last} #${signal.player.number}
                                 </div>
                                 <div style="margin-bottom: 8px;">
-                                    ${categoryBadge}
+                                    ${categoryBadge}${sourceBadge}
                                 </div>
                                 <div style="font-size: 13px; color: #7f8c8d;">
-                                    ${signal.metric === 'K_rate_hitting' ? `Hitting: ${signal.player.k} K in ${signal.player.pa} PA` : 
+                                    ${signal.metric === 'K_rate_hitting' ? `Hitting: ${signal.player.k} K in ${signal.player.pa} PA` :
                                       signal.metric === 'BB_rate_hitting_low' ? `Hitting: Only ${signal.player.bb} BB in ${signal.player.pa} PA` :
                                       signal.metric === 'AVG_low' ? `Hitting: ${signal.player.h} H in ${signal.player.ab} AB` :
                                       signal.metric === 'BB_rate_pitching_high' ? `Pitching: ${signal.player.pitchBB} BB in ${signal.player.bf} BF` :
                                       signal.metric === 'K_rate_pitching_low' ? `Pitching: ${signal.player.pitchK} K in ${signal.player.bf} BF` :
                                       signal.metric === 'hitting_performing_well' ? `Hitting: ${signal.player.pa} PA, ${signal.player.avg.toFixed(3)} AVG` :
                                       signal.metric === 'pitching_performing_well' ? `Pitching: ${signal.player.bf} BF, ${signal.player.ip} IP` :
+                                      signal.metric === 'coach_flagged' ? `Flagged by ${escapeHtml(signal.flaggedBy || 'Coach')} on ${new Date(signal.flaggedDate).toLocaleDateString()}` :
                                       `PA: ${signal.player.pa}, AVG: ${signal.player.avg.toFixed(3)}`}
                                 </div>
                             </div>
@@ -1722,6 +1807,59 @@
                             <div class="stat-label">Walks</div>
                             <div class="stat-value">${player.bb}</div>
                         </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        // Render Athlete Stats (My Stats tab)
+        function renderAthleteStats() {
+            const player = appState.currentPlayer;
+            const kRate = player.pa > 0 ? (player.k / player.pa * 100).toFixed(1) : 0;
+            const bbRate = player.pa > 0 ? (player.bb / player.pa * 100).toFixed(1) : 0;
+
+            document.getElementById('athleteStatsContent').innerHTML = `
+                <div class="player-card">
+                    <div class="player-header">
+                        <div class="player-name">${player.first} ${player.last}</div>
+                        <div class="player-number">#${player.number}</div>
+                    </div>
+                    <h3 style="margin: 15px 0;">Season Stats</h3>
+                    <div class="stats-grid">
+                        <div class="stat-item">
+                            <div class="stat-label">Batting AVG</div>
+                            <div class="stat-value">${player.avg.toFixed(3)}</div>
+                        </div>
+                        <div class="stat-item">
+                            <div class="stat-label">Plate Appearances</div>
+                            <div class="stat-value">${player.pa}</div>
+                        </div>
+                        <div class="stat-item">
+                            <div class="stat-label">Hits</div>
+                            <div class="stat-value">${player.h}</div>
+                        </div>
+                        <div class="stat-item ${kRate > 30 ? 'flagged' : ''}">
+                            <div class="stat-label">Strikeout Rate</div>
+                            <div class="stat-value ${kRate > 30 ? 'bad' : ''}">${kRate}%</div>
+                        </div>
+                        <div class="stat-item">
+                            <div class="stat-label">Walk Rate</div>
+                            <div class="stat-value ${bbRate > 10 ? 'good' : ''}">${bbRate}%</div>
+                        </div>
+                        <div class="stat-item">
+                            <div class="stat-label">Walks</div>
+                            <div class="stat-value">${player.bb}</div>
+                        </div>
+                        ${player.bf > 0 ? `
+                        <div class="stat-item">
+                            <div class="stat-label">Innings Pitched</div>
+                            <div class="stat-value">${player.ip}</div>
+                        </div>
+                        <div class="stat-item">
+                            <div class="stat-label">Strikeouts (Pitching)</div>
+                            <div class="stat-value">${player.pitchK}</div>
+                        </div>
+                        ` : ''}
                     </div>
                 </div>
             `;
@@ -2159,6 +2297,98 @@
             `;
         }
 
+        // Render Athlete Focus (My Focus tab) - same underlying data as the
+        // parent's This Week's Focus, but framed directly to the athlete
+        // instead of as a script for a parent to read aloud.
+        function renderAthleteFocus() {
+            const player = appState.currentPlayer;
+            const assignedPlan = appState.plans[player.number];
+
+            if (assignedPlan) {
+                document.getElementById('athleteFocusContent').innerHTML = `
+                    <div class="player-card">
+                        <h2 style="margin-bottom: 20px;">🎯 This Week's Focus</h2>
+                        <div style="margin-bottom: 20px;">
+                            <h4 style="color: #7f8c8d; font-size: 13px; margin-bottom: 8px;">WHAT WE'RE WORKING ON</h4>
+                            <p style="font-size: 18px; color: #2c3e50; font-weight: 600;">${escapeHtml(assignedPlan.focusTags.join(' & '))}</p>
+                        </div>
+
+                        <div style="margin-bottom: 20px;">
+                            <h4 style="color: #7f8c8d; font-size: 13px; margin-bottom: 8px;">WHY</h4>
+                            <p style="color: #34495e;">${escapeHtml(assignedPlan.insight)}</p>
+                        </div>
+
+                        ${assignedPlan.coachCue ? `
+                        <div style="margin-bottom: 20px; padding: 15px; background: #e8f4f8; border-left: 4px solid #3498db; border-radius: 0 6px 6px 0;">
+                            <h4 style="color: #3498db; margin-bottom: 10px;">👨‍🏫 From Your Coach</h4>
+                            <pre style="white-space: pre-wrap; font-family: inherit; margin: 0; color: #2c3e50;">${escapeHtml(assignedPlan.coachCue)}</pre>
+                        </div>
+                        ` : ''}
+
+                        <div style="margin-bottom: 10px;">
+                            <h4 style="color: #7f8c8d; font-size: 13px; margin-bottom: 8px;">YOUR PRACTICE CHECKLIST (10-15 MIN/DAY)</h4>
+                            <div class="drill-checklist">
+                                ${assignedPlan.drills.map((drill, idx) => `
+                                    <div class="drill-item">
+                                        <input type="checkbox" id="drill${idx}" onchange="updateAdherence()">
+                                        <label for="drill${idx}">${escapeHtml(drill)}</label>
+                                    </div>
+                                `).join('')}
+                            </div>
+                            <div style="margin-top: 15px;">
+                                <strong>This week's streak:</strong>
+                                <div class="progress-bar">
+                                    <div class="progress-fill" id="adherenceBar" style="width: 0%;"></div>
+                                </div>
+                                <p style="font-size: 12px; color: #7f8c8d; margin-top: 5px;" id="adherenceText">0 of 7 days completed</p>
+                            </div>
+                        </div>
+                    </div>
+                `;
+                return;
+            }
+
+            const signal = appState.focusSignals.find(s => s.player.number === player.number);
+
+            if (!signal || signal.priority === 'good') {
+                document.getElementById('athleteFocusContent').innerHTML = `
+                    <div class="player-card">
+                        <h2 style="margin-bottom: 15px;">🎯 This Week's Focus</h2>
+                        <h3 style="color: #27ae60; margin-bottom: 10px;">✓ You're doing great!</h3>
+                        <p style="color: #7f8c8d;">${signal ? escapeHtml(signal.insight) : 'No specific focus area right now - keep working on the fundamentals.'}</p>
+                    </div>
+                `;
+                return;
+            }
+
+            const drills = getDrillsForTags(signal.tags);
+
+            document.getElementById('athleteFocusContent').innerHTML = `
+                <div class="player-card">
+                    <h2 style="margin-bottom: 20px;">🎯 This Week's Focus</h2>
+                    <div style="margin-bottom: 20px;">
+                        <h4 style="color: #7f8c8d; font-size: 13px; margin-bottom: 8px;">WHAT WE'RE WORKING ON</h4>
+                        <p style="font-size: 18px; color: #2c3e50; font-weight: 600;">${escapeHtml(signal.tags.join(' & '))}</p>
+                    </div>
+                    <div style="margin-bottom: 20px;">
+                        <h4 style="color: #7f8c8d; font-size: 13px; margin-bottom: 8px;">WHY</h4>
+                        <p style="color: #34495e;">${escapeHtml(signal.insight)}</p>
+                    </div>
+                    <div style="margin-bottom: 10px;">
+                        <h4 style="color: #7f8c8d; font-size: 13px; margin-bottom: 8px;">TRY THESE (10-15 MIN/DAY)</h4>
+                        <div class="drill-checklist">
+                            ${drills.map((drill, idx) => `
+                                <div class="drill-item">
+                                    <input type="checkbox" id="drill${idx}" onchange="updateAdherence()">
+                                    <label for="drill${idx}">${escapeHtml(drill)}</label>
+                                </div>
+                            `).join('')}
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
         // Render Parent Messages
         function renderParentMessages() {
             const player = appState.currentPlayer;
@@ -2187,67 +2417,451 @@
         }
 
         // Helper Functions
-        function getDrillsForTags(tags) {
-            const drillLibrary = {
-                'timing': ['Soft toss with pause at load (10 min)', 'Timing drill - call "go" before swing (5 min)', 'Watch video clip before each session'],
-                'contact point': ['Front toss focusing on contact location (10 min)', 'Contact point stations - inside/middle/outside (10 min)'],
-                'pitch selection': ['Ball tracking drill - call ball/strike (5 min)', 'Two-strike approach work (5 min)'],
-                'release point': ['Towel drill for consistent arm slot (5 min)', 'Wall work - hand to target (5 min)', 'Bullpen focusing on same release (15 min)'],
-                'tempo': ['Count drill - consistent pace between pitches (5 min)', 'Rhythm breathing exercises (5 min)'],
-                'balance': ['Balance point holds (5 min)', 'One-leg drills (5 min)']
-            };
 
+        // Focus content library: every tag a signal (stat-based or coach-flagged)
+        // can carry maps to real drills and parent say/avoid phrasing, grouped by
+        // skill category so the "Add Focus Signal" picker can offer a coach the
+        // right tags for whatever category they're flagging.
+        const FOCUS_CATEGORIES = {
+            hitting: 'Hitting',
+            pitching: 'Pitching',
+            fielding: 'Fielding',
+            baserunning: 'Baserunning',
+            mental: 'Mental Game',
+            conditioning: 'Conditioning'
+        };
+
+        const FOCUS_LIBRARY = {
+            // --- Hitting ---
+            timing: {
+                category: 'hitting',
+                drills: [
+                    'Soft toss with pause at load (10 min)',
+                    'Timing drill - call "go" before swing (5 min)',
+                    'Front toss, varying speeds each round (10 min)'
+                ],
+                parentSay: [
+                    "I love how you're tracking the ball out of the pitcher's hand",
+                    'Your timing looks smoother today',
+                    'Great decision to let that one go'
+                ],
+                parentAvoid: ['You need to stop striking out', 'You have to get hits', 'Why did you swing at that?']
+            },
+            'contact point': {
+                category: 'hitting',
+                drills: [
+                    'Front toss focusing on contact location (10 min)',
+                    'Contact point stations - inside/middle/outside (10 min)',
+                    'Tee work at three contact depths (10 min)'
+                ],
+                parentSay: ['That was square contact', 'I saw you adjust mid-swing - nice', 'Good barrel control today'],
+                parentAvoid: ['You keep missing it', 'Just hit the ball harder', "You're not trying"]
+            },
+            'pitch selection': {
+                category: 'hitting',
+                drills: [
+                    'Ball tracking drill - call ball/strike (5 min)',
+                    'Two-strike approach work (5 min)',
+                    'Live BP, swing only at strikes (10 min)'
+                ],
+                parentSay: ["Great eye - that was a tough pitch to lay off", "I love how you're being selective", 'Good discipline at the plate'],
+                parentAvoid: ['You should have swung at that', "You're too picky", 'Just put the bat on the ball']
+            },
+            approach: {
+                category: 'hitting',
+                drills: [
+                    'Situational BP - practice a two-strike plan (10 min)',
+                    'Visualize at-bat goals before each round (5 min)',
+                    'Walk through pre-pitch routine, 5 reps (5 min)'
+                ],
+                parentSay: ['I liked your plan in that at-bat', 'You stayed calm up there', 'Good adjustment from last at-bat'],
+                parentAvoid: ['You need a better approach', 'Think before you swing', 'What were you looking for?']
+            },
+            'hand path': {
+                category: 'hitting',
+                drills: [
+                    'One-hand drills, top and bottom hand (5 min each)',
+                    'Short-to-the-ball tee work (10 min)',
+                    'Resistance band swings for path feel (5 min)'
+                ],
+                parentSay: ['Your swing looked quick to the ball', 'Nice short path today', 'Good hands through the zone'],
+                parentAvoid: ['Your swing is too long', 'Quit swinging around it', "You're casting the bat"]
+            },
+            bunting: {
+                category: 'hitting',
+                drills: [
+                    'Bunt placement - 10 reps each to 1B/3B (10 min)',
+                    'Pivot-and-square footwork, no ball (5 min)',
+                    'Live bunt-for-a-hit reps off coach flips (10 min)'
+                ],
+                parentSay: ['Good pocket on that bunt', 'Nice, soft hands', "You squared early - that's the plan"],
+                parentAvoid: ["Just lay it down", "That's an easy play", "You should've gotten the bunt down"]
+            },
+            power: {
+                category: 'hitting',
+                drills: [
+                    'Medicine ball rotational throws (10 reps x 3 sets)',
+                    'Tee work emphasizing full extension (10 min)',
+                    'Heavy-bat swings for strength feel, 10 reps (5 min)'
+                ],
+                parentSay: ['That had great extension', 'Nice drive through the ball', 'Your bat speed looked quick'],
+                parentAvoid: ["You need to hit it farther", 'Swing harder', "That's not a real home run swing"]
+            },
+
+            // --- Pitching ---
+            'release point': {
+                category: 'pitching',
+                drills: [
+                    'Towel drill for consistent arm slot (5 min)',
+                    'Wall work - hand to target (5 min)',
+                    'Bullpen focusing on same release (15 min)'
+                ],
+                parentSay: ['Your arm path looks consistent', "I like how you're hitting your spot", 'Good rhythm on the mound'],
+                parentAvoid: ['Stop walking batters', 'You need to throw strikes', "What's wrong with your control?"]
+            },
+            tempo: {
+                category: 'pitching',
+                drills: [
+                    'Count drill - consistent pace between pitches (5 min)',
+                    'Rhythm breathing exercises (5 min)',
+                    'Bullpen with a 12-second pitch clock (10 min)'
+                ],
+                parentSay: ['Good pace out there', 'You looked in control of the inning', 'Nice job slowing the game down'],
+                parentAvoid: ['You were rushing', 'Slow down out there', "Why'd you speed up?"]
+            },
+            balance: {
+                category: 'pitching',
+                drills: [
+                    'Balance point holds (5 min)',
+                    'One-leg drills (5 min)',
+                    'Walking windups for posture, 10 reps (5 min)'
+                ],
+                parentSay: ['Your balance looked strong', 'Nice, stable delivery', 'You finished in control'],
+                parentAvoid: ["You're falling off the mound", 'Stay balanced!', "Your mechanics are a mess"]
+            },
+            'arm path': {
+                category: 'pitching',
+                drills: [
+                    'Long toss focusing on arm circle (10 min)',
+                    'Mirror drill for arm action, no ball (5 min)',
+                    'Plyo ball rebounder work (10 min)'
+                ],
+                parentSay: ['Your arm looked loose today', 'Nice, free and easy motion', 'Good extension on that throw'],
+                parentAvoid: ["Your arm looks hurt", "You're short-arming it", 'Fix your arm action']
+            },
+            control: {
+                category: 'pitching',
+                drills: [
+                    'Bullpen, 10 pitches to each quadrant (15 min)',
+                    'Target practice with a glove as the target (10 min)',
+                    'One-knee throws for direction (5 min)'
+                ],
+                parentSay: ['You were around the zone all day', 'Good job competing in the zone', 'Nice command of that pitch'],
+                parentAvoid: ['You walked too many guys', 'Just throw strikes', 'Control is the whole game']
+            },
+            'pitch mix': {
+                category: 'pitching',
+                drills: [
+                    'Bullpen alternating pitch types by count (15 min)',
+                    'Catch-play calling pitches before each throw (10 min)',
+                    'Chart a simulated at-bat sequence (10 min)'
+                ],
+                parentSay: ['Good sequencing out there', 'I liked that pitch selection', 'You kept them off balance'],
+                parentAvoid: ['You should have thrown your other pitch', "That pitch call was bad", 'Mix it up more']
+            },
+            'mound presence': {
+                category: 'pitching',
+                drills: [
+                    'Practice a between-pitches reset routine (5 min)',
+                    'Simulated-adversity bullpen - pretend bases are loaded (10 min)',
+                    "Breathing routine after a 'bad' pitch (5 min)"
+                ],
+                parentSay: ['You looked calm out there', 'Great job resetting after that', "You didn't let that rattle you"],
+                parentAvoid: ["You looked rattled", 'Shake it off', "Don't let it get to you"]
+            },
+
+            // --- Fielding ---
+            'glove work': {
+                category: 'fielding',
+                drills: [
+                    'Short-hop reads off a wall, 15 reps (10 min)',
+                    'Two-hand fielding fundamentals (10 min)',
+                    'Barehand-to-glove transfer speed reps (5 min)'
+                ],
+                parentSay: ['Great hands on that one', 'Nice, soft glove work', 'You stayed with it all the way in'],
+                parentAvoid: ['You should have caught that', "Don't be scared of the ball", 'Easy play, come on']
+            },
+            footwork: {
+                category: 'fielding',
+                drills: [
+                    'Ladder footwork for first-step quickness (5 min)',
+                    'Shuffle-and-field reps, both directions (10 min)',
+                    'Crow-hop throwing footwork (10 min)'
+                ],
+                parentSay: ['Your feet were quick to the ball', 'Good footwork on that transfer', 'Nice first step'],
+                parentAvoid: ['You were flat-footed', 'Move your feet!', "You're too slow getting there"]
+            },
+            'throwing accuracy': {
+                category: 'fielding',
+                drills: [
+                    'Partner catch at game distance, target the chest (10 min)',
+                    'Throw-to-a-target station, 15 reps (10 min)',
+                    'Crow-hop and throw for carry (10 min)'
+                ],
+                parentSay: ['That throw was right on the money', 'Nice, strong and accurate', 'Good throw under pressure'],
+                parentAvoid: ['That throw was awful', 'You have to make that throw', "Why'd you throw it away?"]
+            },
+            'pre-pitch readiness': {
+                category: 'fielding',
+                drills: [
+                    'Ready-position reps on every pitch during BP (10 min)',
+                    "Practice calling out the situation before each pitch (5 min)",
+                    'Game-situation pop quizzes between reps (5 min)'
+                ],
+                parentSay: ['You were ready on every pitch', 'I could tell you knew the situation', 'Good focus out there'],
+                parentAvoid: ['You looked asleep out there', 'Pay attention!', "You weren't ready for that one"]
+            },
+
+            // --- Baserunning ---
+            'first-step reaction': {
+                category: 'baserunning',
+                drills: [
+                    'Lead-off and reaction-to-pitch reps (10 min)',
+                    'Reaction sprints off a coach signal (5 min)',
+                    'Secondary-lead timing practice (10 min)'
+                ],
+                parentSay: ['Great jump on that pitch', 'Your read was quick', 'Nice, aggressive first step'],
+                parentAvoid: ["You're too slow off the bag", 'You should have gone', "That jump was late"]
+            },
+            'sliding technique': {
+                category: 'baserunning',
+                drills: [
+                    'Bent-leg slide reps into a bag or towel (10 min)',
+                    'Pop-up slide practice (10 min)',
+                    'Headfirst-vs-feet-first situational reps (10 min)'
+                ],
+                parentSay: ['That slide was smooth', 'Good, safe slide technique', 'Nice job staying low'],
+                parentAvoid: ["You're going to get hurt sliding like that", 'That slide was ugly', 'Slide better']
+            },
+            'base awareness': {
+                category: 'baserunning',
+                drills: [
+                    'Situational baserunning - practice reading fly balls (10 min)',
+                    'Walk through force-vs-tag situations (10 min)',
+                    "Practice tagging up on contact (10 min)"
+                ],
+                parentSay: ['Great read on that fly ball', 'You knew exactly where to go', 'Smart baserunning there'],
+                parentAvoid: ["You should have known that", 'That was a bad read', "Think out there!"]
+            },
+
+            // --- Mental Game ---
+            confidence: {
+                category: 'mental',
+                drills: [
+                    'Keep a 3-good-things-today journal after practice (5 min)',
+                    'Visualize a successful at-bat or inning before sleep (5 min)',
+                    'Positive self-talk reps during soft toss (10 min)'
+                ],
+                parentSay: ["I love watching you compete", 'You believed in that swing', "I'm proud of how you battled"],
+                parentAvoid: ["You don't look confident out there", 'Just believe in yourself', 'Stop being nervous']
+            },
+            composure: {
+                category: 'mental',
+                drills: [
+                    'Breathing reset routine after a mistake, practice 5x (5 min)',
+                    "Simulated-pressure reps with a 'mistake' built in (10 min)",
+                    'Between-pitch routine practice (5 min)'
+                ],
+                parentSay: ['You bounced back from that so well', 'Great reset after that mistake', 'I liked how calm you stayed'],
+                parentAvoid: ['You let that get to you', 'Calm down', "You can't let one play ruin it"]
+            },
+            focus: {
+                category: 'mental',
+                drills: [
+                    'One-pitch-at-a-time cue cards during BP (10 min)',
+                    'Distraction drills - practice with crowd noise/music (10 min)',
+                    'Short mindfulness/breathing routine before practice (5 min)'
+                ],
+                parentSay: ['You were locked in today', 'Great focus out there', "You didn't let anything distract you"],
+                parentAvoid: ['Pay attention!', 'You looked distracted all game', "Focus, come on"]
+            },
+            resilience: {
+                category: 'mental',
+                drills: [
+                    'Practice an after-mistake routine (5 min)',
+                    'Review one tough moment on video together, find one positive (10 min)',
+                    "Set a 'next pitch' cue word to use in games (5 min)"
+                ],
+                parentSay: ['That strikeout is behind you - great next at-bat', 'I loved your response to that', "You didn't let it snowball"],
+                parentAvoid: ["You can't let that happen again", "That was a bad inning", "Shake it off and move on"]
+            },
+
+            // --- Conditioning ---
+            'arm care': {
+                category: 'conditioning',
+                drills: [
+                    'Daily arm-care band routine (10 min)',
+                    'Dynamic shoulder warmup before every throwing session (5 min)',
+                    'Ice/rest protocol after high-pitch-count outings'
+                ],
+                parentSay: ['Great job doing your arm care', 'I noticed you warmed up well today', "That's smart, protecting your arm"],
+                parentAvoid: ['Just throw through it', "It's not that sore", 'You can skip the warmup today']
+            },
+            agility: {
+                category: 'conditioning',
+                drills: [
+                    'Cone shuffle drills, 5 reps (10 min)',
+                    'Ladder agility work (10 min)',
+                    'Reaction-ball drills (5 min)'
+                ],
+                parentSay: ['Your quickness looked great today', 'Nice, explosive movement', 'You looked fast out there'],
+                parentAvoid: ["You're slow", 'You need to move faster', "Everyone else is quicker than you"]
+            },
+            'speed/explosiveness': {
+                category: 'conditioning',
+                drills: [
+                    'Sprint starts, 10-yard bursts x 6 (10 min)',
+                    'Broad jump reps for explosiveness (10 min)',
+                    'Resisted sprints with a band, if available (10 min)'
+                ],
+                parentSay: ['Your first step looked explosive', 'Nice burst out of the box', 'You got there fast'],
+                parentAvoid: ['You need to run faster', "You're too slow down the line", 'Hustle more']
+            }
+        };
+
+        function getTagsForCategory(category) {
+            return Object.keys(FOCUS_LIBRARY).filter(tag => FOCUS_LIBRARY[tag].category === category);
+        }
+
+        function getDrillsForTags(tags) {
             let drills = [];
             tags.forEach(tag => {
-                if (drillLibrary[tag]) {
-                    drills = drills.concat(drillLibrary[tag]);
+                if (FOCUS_LIBRARY[tag]) {
+                    drills = drills.concat(FOCUS_LIBRARY[tag].drills);
                 }
             });
-            return drills.slice(0, 3); // Return top 3
+            return drills.slice(0, 5); // Top 5 across all tags on the signal
         }
 
         function getCuesForTags(tags) {
-            const cueLibrary = {
-                'timing': {
-                    say: [
-                        "I love how you're tracking the ball out of the pitcher's hand",
-                        "Your timing looks smoother today",
-                        "Great decision to let that one go"
-                    ],
-                    avoid: [
-                        "You need to stop striking out",
-                        "You have to get hits",
-                        "Why did you swing at that?"
-                    ]
-                },
-                'release point': {
-                    say: [
-                        "Your arm path looks consistent",
-                        "I like how you're hitting your spot",
-                        "Good rhythm on the mound"
-                    ],
-                    avoid: [
-                        "Stop walking batters",
-                        "You need to throw strikes",
-                        "What's wrong with your control?"
-                    ]
-                },
-                'pitch selection': {
-                    say: [
-                        "Great eye - that was a tough pitch to lay off",
-                        "I love how you're being selective",
-                        "Good discipline at the plate"
-                    ],
-                    avoid: [
-                        "You should have swung at that",
-                        "You're too picky",
-                        "Just put the bat on the ball"
-                    ]
+            // Merge say/avoid phrasing across every tag on the signal (not just the
+            // first) so a multi-tag signal doesn't silently drop its other tags'
+            // guidance, and so a tag missing from the library never falls back to
+            // unrelated advice.
+            const say = [];
+            const avoid = [];
+            tags.forEach(tag => {
+                const entry = FOCUS_LIBRARY[tag];
+                if (entry) {
+                    say.push(...entry.parentSay);
+                    avoid.push(...entry.parentAvoid);
                 }
-            };
+            });
+            if (say.length === 0) {
+                return FOCUS_LIBRARY.timing ? { say: FOCUS_LIBRARY.timing.parentSay, avoid: FOCUS_LIBRARY.timing.parentAvoid } : { say: [], avoid: [] };
+            }
+            return { say: say.slice(0, 4), avoid: avoid.slice(0, 4) };
+        }
 
-            const primaryTag = tags[0];
-            return cueLibrary[primaryTag] || cueLibrary['timing'];
+        // Coach manual focus-signal flag: lets a coach put a player on the
+        // focus queue directly - from something seen live, on video, or heard
+        // from the athlete/parent - without waiting for a stat threshold to
+        // trip. Unlike stat signals, these survive generateFocusSignals()
+        // regenerating the stat-triggered ones.
+        window.openAddFocusSignalModal = function() {
+            if (appState.players.length === 0) {
+                alert('Add players to the roster first.');
+                return;
+            }
+
+            document.getElementById('messageModalContent').innerHTML = `
+                <h2 style="margin-bottom: 20px;">➕ Add Focus Signal</h2>
+
+                <div class="form-group">
+                    <label>Player</label>
+                    <select id="newSignalPlayer">
+                        ${appState.players.map(p => `<option value="${p.number}">#${p.number} ${escapeHtml(p.first)} ${escapeHtml(p.last)}</option>`).join('')}
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label>Category</label>
+                    <select id="newSignalCategory" onchange="updateNewSignalTagOptions()">
+                        ${Object.entries(FOCUS_CATEGORIES).map(([key, label]) => `<option value="${key}">${label}</option>`).join('')}
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label>Priority</label>
+                    <select id="newSignalPriority">
+                        <option value="high">🔴 High Priority</option>
+                        <option value="watch" selected>🟡 Watch</option>
+                        <option value="good">✅ On Track / Strength</option>
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label>What did you notice?</label>
+                    <textarea id="newSignalInsight" placeholder="e.g., On film from Saturday's game, his glove-side elbow is flying open on contact pitches." style="min-height: 80px;"></textarea>
+                </div>
+
+                <div class="form-group">
+                    <label>Focus Tags (pick 1-3 - these drive the suggested drills)</label>
+                    <div id="newSignalTagOptions" class="tags"></div>
+                </div>
+
+                <div style="display: flex; gap: 10px; margin-top: 20px;">
+                    <button class="btn btn-success" onclick="confirmAddFocusSignal()">✓ Add to Focus Queue</button>
+                    <button class="btn btn-secondary" onclick="closeModal('messageModal')">Cancel</button>
+                </div>
+            `;
+
+            updateNewSignalTagOptions();
+            document.getElementById('messageModal').classList.add('active');
+        }
+
+        window.updateNewSignalTagOptions = function() {
+            const category = document.getElementById('newSignalCategory').value;
+            const container = document.getElementById('newSignalTagOptions');
+            container.innerHTML = getTagsForCategory(category).map(tag =>
+                `<span class="tag" data-tag="${escapeHtml(tag)}" onclick="this.classList.toggle('selected')" style="cursor: pointer;">${escapeHtml(tag)}</span>`
+            ).join('');
+        }
+
+        window.confirmAddFocusSignal = function() {
+            const playerNumber = parseInt(document.getElementById('newSignalPlayer').value);
+            const category = document.getElementById('newSignalCategory').value;
+            const priority = document.getElementById('newSignalPriority').value;
+            const insight = document.getElementById('newSignalInsight').value.trim();
+            const tags = Array.from(document.querySelectorAll('#newSignalTagOptions .tag.selected')).map(el => el.dataset.tag);
+
+            if (!insight) {
+                alert('Describe what you noticed');
+                return;
+            }
+            if (tags.length === 0) {
+                alert('Pick at least one focus tag');
+                return;
+            }
+
+            const player = appState.players.find(p => p.number === playerNumber);
+            appState.focusSignals.push({
+                player: player,
+                source: 'coach',
+                category: category,
+                metric: 'coach_flagged',
+                value: null,
+                priority: priority,
+                insight: insight,
+                tags: tags,
+                flaggedBy: appState.currentUser,
+                flaggedDate: new Date().toISOString()
+            });
+            saveState();
+
+            closeModal('messageModal');
+            renderFocusQueue();
+            alert(`${player.first} ${player.last} added to the focus queue.`);
         }
 
         function assignPlan(signalIdx) {
@@ -2263,7 +2877,7 @@
                 </div>
 
                 <div class="form-group">
-                    <label>Focus Areas (Auto-detected from stats)</label>
+                    <label>Focus Areas ${signal.source === 'coach' ? '(Coach flagged)' : '(Auto-detected from stats)'}</label>
                     <div class="tags">
                         ${signal.tags.map(tag => `<span class="tag selected">${tag}</span>`).join('')}
                     </div>
@@ -4273,6 +4887,41 @@ Example:
             `).join('');
         }
 
+        function renderAthleteVideos() {
+            const player = appState.currentPlayer;
+            const videos = getVisibleVideos('athlete', player);
+
+            const container = document.getElementById('athleteVideoContent');
+            container.innerHTML = `
+                <h2 style="margin-bottom: 20px;">🎥 Videos</h2>
+                <div id="athleteVideoPlayerSection" style="display: none; margin-bottom: 20px;"></div>
+                <div class="video-library" id="athleteVideoLibraryGrid"></div>
+            `;
+
+            const grid = document.getElementById('athleteVideoLibraryGrid');
+            if (videos.length === 0) {
+                grid.innerHTML = `
+                    <div style="grid-column: 1/-1; text-align: center; padding: 40px; color: #7f8c8d;">
+                        <div style="font-size: 48px; margin-bottom: 15px;">📹</div>
+                        <p>No videos shared yet.</p>
+                    </div>
+                `;
+                return;
+            }
+
+            grid.innerHTML = videos.map(video => `
+                <div class="video-card" onclick="openVideo('athlete', ${video.id})" style="cursor: pointer;">
+                    <div class="video-thumbnail">
+                        <div style="display: flex; align-items: center; justify-content: center; height: 100%; color: white; font-size: 48px;">🎥</div>
+                    </div>
+                    <div class="video-info">
+                        <div style="margin-bottom: 8px;">${videoAssignmentBadge(video)}</div>
+                        <div class="video-title">${escapeHtml(video.name)}</div>
+                        <div class="video-meta">${video.comments.length} comment${video.comments.length !== 1 ? 's' : ''} • ${new Date(video.uploadDate).toLocaleDateString()}</div>
+                    </div>
+                </div>
+            `).join('');
+        }
 
         function closeModal(modalId) {
             document.getElementById(modalId).classList.remove('active');
@@ -4299,7 +4948,7 @@ Example:
                 e.target.classList.add('active');
                 
                 // Update active content
-                const container = e.target.closest('#coachView, #parentView');
+                const container = e.target.closest('#coachView, #parentView, #athleteView');
                 container.querySelectorAll('.tab-content').forEach(content => {
                     content.classList.remove('active');
                 });
@@ -4554,7 +5203,8 @@ Example:
                         pendingParentRequests: localStorage.getItem('pendingParentRequests'),
                         developmentPlans: localStorage.getItem('developmentPlans'),
                         seasonHistory: localStorage.getItem('seasonHistory'),
-                        videos: localStorage.getItem('videos')
+                        videos: localStorage.getItem('videos'),
+                        focusSignals: localStorage.getItem('focusSignals')
                     }
                 };
                 
