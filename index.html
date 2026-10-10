@@ -4,6 +4,13 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Couloak Diesel Development OS</title>
+    <link rel="manifest" href="manifest.json">
+    <link rel="icon" href="icons/favicon-32.png">
+    <link rel="apple-touch-icon" href="icons/icon-192.png">
+    <meta name="theme-color" content="#2c3e50">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="Couloak">
     <style>
         * {
             margin: 0;
@@ -5921,6 +5928,19 @@ Questions? Contact your head coach.
         // Run backup reminder check when page loads (only for coach view)
         if (document.querySelector('#coachView')) {
             checkBackupReminder();
+        }
+
+        // Register the service worker so the app is installable
+        // ("Add to Home Screen") and its shell works offline. This script
+        // runs at the end of <body>, after the page has already loaded,
+        // so register immediately rather than waiting on a 'load' event
+        // that has already fired by this point. Skipped outside http(s)
+        // contexts (e.g. a plain file:// open) since service workers
+        // require a secure origin there.
+        if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
+            navigator.serviceWorker.register('sw.js').catch((err) => {
+                console.error('Service worker registration failed:', err);
+            });
         }
     </script>
 </body>
