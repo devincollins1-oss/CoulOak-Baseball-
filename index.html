@@ -1206,11 +1206,18 @@
         // parent/athlete linked to one player) and, once resolved, starts
         // the app exactly like the old password/access-code login() used to.
         async function completeSignIn(user) {
-            const { data: profile } = await supabaseClient
+            const { data: profile, error: profileError } = await supabaseClient
                 .from('profiles')
                 .select('role')
                 .eq('id', user.id)
                 .maybeSingle();
+
+            if (profileError) {
+                console.error('Could not check profile status:', profileError);
+                alert('Could not verify your account status - please try again in a moment.');
+                showAuthStep('authEmailStep');
+                return;
+            }
 
             if (profile) {
                 if (profile.role === 'coach') {
@@ -1223,10 +1230,17 @@
 
             // No profile yet - first time this email has ever signed in.
             // Has the coach already granted this email access to a player?
-            const { data: access } = await supabaseClient
+            const { data: access, error: accessError } = await supabaseClient
                 .from('parent_access')
                 .select('status')
                 .ilike('parent_email', user.email);
+
+            if (accessError) {
+                console.error('Could not check parent access status:', accessError);
+                alert('Could not verify your account status - please try again in a moment.');
+                showAuthStep('authEmailStep');
+                return;
+            }
 
             if (access && access.length > 0) {
                 if (access.some(a => a.status === 'approved')) {
@@ -1244,7 +1258,18 @@
                 return;
             }
 
-            const { data: coachExists } = await supabaseClient.rpc('any_coach_profile_exists');
+            const { data: coachExists, error: coachCheckError } = await supabaseClient.rpc('any_coach_profile_exists');
+            if (coachCheckError) {
+                // Fail closed: if we can't actually confirm whether a coach
+                // exists, never show the self-service "set me up as coach"
+                // button on a guess - that's the one screen a real security
+                // mistake here could matter on. Bounce back to email entry
+                // and let them retry.
+                console.error('Could not check coach status:', coachCheckError);
+                alert('Could not verify your account status - please try again in a moment.');
+                showAuthStep('authEmailStep');
+                return;
+            }
             showAuthStep(coachExists ? 'authNoAccessStep' : 'authBootstrapCoachStep');
         }
 
