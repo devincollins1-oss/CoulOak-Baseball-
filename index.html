@@ -675,6 +675,7 @@
             <div class="nav-tabs">
                 <button class="nav-tab active" data-tab="team-overview">📊 Team Overview</button>
                 <button class="nav-tab" data-tab="focus-queue">🎯 Focus Queue</button>
+                <button class="nav-tab" data-tab="countdown">⏳ Countdown</button>
                 <button class="nav-tab" data-tab="all-players">👥 All Players</button>
                 <button class="nav-tab" data-tab="video-analysis">🎥 Video Analysis</button>
                 <button class="nav-tab" data-tab="team-management">⚙️ Team Management</button>
@@ -690,6 +691,11 @@
             <!-- Focus Queue Tab -->
             <div class="tab-content" id="focus-queue">
                 <div id="focusQueueContent"></div>
+            </div>
+
+            <!-- Countdown Tab -->
+            <div class="tab-content" id="countdown">
+                <div id="countdownContent"></div>
             </div>
 
             <!-- All Players Tab -->
@@ -747,6 +753,7 @@
 
             <!-- This Week Tab -->
             <div class="tab-content" id="this-week">
+                <div id="parentCountdownBanner"></div>
                 <div id="weeklyFocusContent"></div>
             </div>
 
@@ -782,6 +789,7 @@
 
             <!-- My Focus Tab -->
             <div class="tab-content" id="my-focus">
+                <div id="athleteCountdownBanner"></div>
                 <div id="athleteFocusContent"></div>
             </div>
 
@@ -833,6 +841,7 @@
             videos: [], // { id, name, url, uploadDate, uploadedBy, description, comments: [], assignedTo: 'team'|playerNumber }
             currentVideo: null,
             videoFilter: 'all',
+            countdownGoals: [], // { id, eventName, eventDate, scope: 'team'|playerNumber, preparationFocus, progressState, firedMilestones: [], createdBy, createdDate }
             parentAccess: [], // { parentEmail, parentName, playerNumber, status: 'pending'|'approved'|'denied', requestDate }
             pendingParentRequests: [],
             seasons: [
@@ -862,7 +871,8 @@
             plans: 'developmentPlans',
             pendingParentRequests: 'pendingParentRequests',
             videos: 'videos',
-            focusSignals: 'focusSignals'
+            focusSignals: 'focusSignals',
+            countdownGoals: 'countdownGoals'
         };
 
         // Persist the coach-editable parts of appState. Call after any
@@ -878,6 +888,7 @@
                 localStorage.setItem(STORAGE_KEYS.pendingParentRequests, JSON.stringify(appState.pendingParentRequests));
                 localStorage.setItem(STORAGE_KEYS.videos, JSON.stringify(appState.videos));
                 localStorage.setItem(STORAGE_KEYS.focusSignals, JSON.stringify(appState.focusSignals));
+                localStorage.setItem(STORAGE_KEYS.countdownGoals, JSON.stringify(appState.countdownGoals));
             } catch (error) {
                 console.error('Save error:', error);
             }
@@ -923,6 +934,9 @@
                         if (livePlayer) signal.player = livePlayer;
                     });
                 }
+
+                const storedCountdownGoals = localStorage.getItem(STORAGE_KEYS.countdownGoals);
+                if (storedCountdownGoals) appState.countdownGoals = JSON.parse(storedCountdownGoals);
             } catch (error) {
                 console.error('Load error:', error);
             }
@@ -1117,6 +1131,12 @@
             // Update season display
             updateSeasonDisplay();
 
+            // Regenerate stat signals and fire any countdown milestones that
+            // are now due before the first render, so the initial view isn't
+            // one cycle behind.
+            generateFocusSignals();
+            checkCountdownMilestones();
+
             if (role === 'coach') {
                 showCoachView();
             } else if (role === 'athlete') {
@@ -1124,8 +1144,6 @@
             } else {
                 showParentView();
             }
-
-            generateFocusSignals();
         }
 
         // Update Season Display
@@ -1146,6 +1164,7 @@
             document.getElementById('coachView').style.display = 'block';
             renderTeamOverview();
             renderFocusQueue();
+            renderCountdowns();
             renderAllPlayers();
             renderVideoAnalysis();
             renderTeamManagement();
@@ -1157,6 +1176,7 @@
             renderChildStats();
             renderParentFocusAreas();
             renderWeeklyFocus();
+            renderCountdownBanner('parentCountdownBanner', appState.currentPlayer);
             renderParentVideos();
             renderCheckIn('parent');
             renderParentMessages();
@@ -1166,6 +1186,7 @@
             document.getElementById('athleteView').style.display = 'block';
             renderAthleteStats();
             renderAthleteFocus();
+            renderCountdownBanner('athleteCountdownBanner', appState.currentPlayer);
             renderAthleteVideos();
             renderCheckIn('athlete');
         }
@@ -1400,6 +1421,292 @@
             };
         }
 
+        // ============================================
+        // COUNTDOWN GOALS (target-event milestone engine)
+        // ============================================
+        // A coach sets a target event (tryouts, season opener, tournament...)
+        // for the team or one player. As the event approaches, this fires a
+        // milestone-specific preparation prompt as a focus signal - the same
+        // signal pipeline as a coach flag, a promoted video comment, or a
+        // check-in, just triggered by the calendar instead of a person.
+        // Every milestone signal is framed as a mental-game/support prompt
+        // (confidence, routine, reflection) rather than a technical
+        // correction, so it reads the same way to a parent as the rest of
+        // this app's "what to say" guidance already does.
+
+        // Ordered nearest-first; each entry's `prompt` is the question/action
+        // shown to the athlete, and `tags` pull real drills/cues from FOCUS_LIBRARY.
+        const COUNTDOWN_MILESTONES = [
+            { day: 30, label: '30 days out', tags: ['confidence'],
+              prompt: (goal) => `${goal.eventName} is 30 days out. What's one thing in your control you can focus on between now and then?${goal.preparationFocus ? ` Coach's focus for this one: ${goal.preparationFocus}.` : ''}` },
+            { day: 20, label: '20 days out', tags: ['focus'],
+              prompt: (goal) => `${goal.eventName} is 20 days out. What are you doing every day to prepare? Keep track of your practice habits this week.` },
+            { day: 15, label: '15 days out', tags: ['confidence', 'composure'],
+              prompt: (goal) => `${goal.eventName} is 15 days out. How ready do you feel right now? Check in on your confidence, stress, and energy.` },
+            { day: 10, label: '10 days out', tags: ['focus'],
+              prompt: (goal) => `${goal.eventName} is 10 days out. Keep up whatever's been working - consistency matters more than anything new right now.` },
+            { day: 7, label: '1 week out', tags: ['composure'],
+              prompt: (goal) => `${goal.eventName} is a week out. Let's rehearse your game-day routine - warmup, mental prep, what you'll eat and pack.` },
+            { day: 3, label: '3 days out', tags: ['resilience', 'confidence'],
+              prompt: (goal) => `${goal.eventName} is 3 days out. Time for a reset: what's one thing you're proud of so far, and one thing you're letting go of?` },
+            { day: 1, label: '1 day out', tags: ['resilience', 'confidence'],
+              prompt: (goal) => `${goal.eventName} is tomorrow. Time for a reset: what's one thing you're proud of so far, and one thing you're letting go of?` },
+            { day: 0, label: 'event day', tags: ['confidence'],
+              prompt: (goal) => `Today's the day - ${goal.eventName}. Trust your preparation.` }
+        ];
+
+        function daysUntil(dateStr) {
+            const msPerDay = 24 * 60 * 60 * 1000;
+            const today = new Date(); today.setHours(0, 0, 0, 0);
+            const target = new Date(dateStr); target.setHours(0, 0, 0, 0);
+            return Math.round((target - today) / msPerDay);
+        }
+
+        window.openAddCountdownModal = function() {
+            if (appState.players.length === 0) {
+                alert('Add players to the roster first.');
+                return;
+            }
+            document.getElementById('messageModalContent').innerHTML = `
+                <h2 style="margin-bottom: 20px;">⏳ New Countdown Goal</h2>
+
+                <div class="form-group">
+                    <label>Event Name</label>
+                    <input type="text" id="newCountdownName" placeholder="e.g., Tryouts, Season Opener, Championship">
+                </div>
+
+                <div class="form-group">
+                    <label>Event Date</label>
+                    <input type="date" id="newCountdownDate">
+                </div>
+
+                <div class="form-group">
+                    <label>Who's this for?</label>
+                    <select id="newCountdownScope">
+                        <option value="team">👥 Whole Team</option>
+                        <optgroup label="One Player">
+                            ${appState.players.map(p => `<option value="${p.number}">#${p.number} ${escapeHtml(p.first)} ${escapeHtml(p.last)}</option>`).join('')}
+                        </optgroup>
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label>Preparation Focus (optional)</label>
+                    <input type="text" id="newCountdownFocus" placeholder="e.g., mental toughness, two-strike approach">
+                </div>
+
+                <div style="display: flex; gap: 10px; margin-top: 20px;">
+                    <button class="btn btn-success" onclick="confirmAddCountdown()">✓ Create Countdown</button>
+                    <button class="btn btn-secondary" onclick="closeModal('messageModal')">Cancel</button>
+                </div>
+            `;
+            document.getElementById('messageModal').classList.add('active');
+        }
+
+        window.confirmAddCountdown = function() {
+            const eventName = document.getElementById('newCountdownName').value.trim();
+            const eventDate = document.getElementById('newCountdownDate').value;
+            const scopeValue = document.getElementById('newCountdownScope').value;
+            const preparationFocus = document.getElementById('newCountdownFocus').value.trim();
+
+            if (!eventName || !eventDate) {
+                alert('Please enter an event name and date');
+                return;
+            }
+
+            appState.countdownGoals.push({
+                id: Date.now(),
+                eventName: eventName,
+                eventDate: eventDate,
+                scope: scopeValue === 'team' ? 'team' : parseInt(scopeValue),
+                preparationFocus: preparationFocus,
+                progressState: 'active',
+                firedMilestones: [],
+                createdBy: appState.currentUser,
+                createdDate: new Date().toISOString()
+            });
+            saveState();
+
+            closeModal('messageModal');
+            checkCountdownMilestones();
+            renderCountdowns();
+            renderFocusQueue();
+            renderTeamOverview();
+            alert(`Countdown to "${eventName}" created.`);
+        }
+
+        window.archiveCountdown = function(id) {
+            const goal = appState.countdownGoals.find(g => g.id === id);
+            if (!goal) return;
+            if (!confirm(`Archive the countdown to "${goal.eventName}"? Past milestone signals stay on the focus queue until replaced or cleared.`)) return;
+            goal.progressState = 'archived';
+            saveState();
+            renderCountdowns();
+        }
+
+        // Pushes one focus signal per affected player for a fired milestone.
+        function fireCountdownMilestone(goal, milestone) {
+            const affectedPlayers = goal.scope === 'team' ? appState.players : appState.players.filter(p => p.number === goal.scope);
+            const insight = milestone.prompt(goal);
+
+            affectedPlayers.forEach(player => {
+                appState.focusSignals.push({
+                    player: player,
+                    source: 'countdown',
+                    category: 'mental',
+                    metric: 'countdown_milestone',
+                    value: null,
+                    priority: milestone.day === 0 ? 'good' : 'watch',
+                    insight: insight,
+                    tags: milestone.tags,
+                    flaggedBy: 'Countdown',
+                    flaggedDate: new Date().toISOString(),
+                    sourceCountdownId: goal.id,
+                    sourceCountdownName: goal.eventName,
+                    milestoneLabel: milestone.label
+                });
+            });
+        }
+
+        // Checks every active countdown goal and fires whichever milestone is
+        // now due. If several thresholds were crossed since the app was last
+        // opened (e.g. the 20-day and 15-day marks both passed), only the
+        // nearest one fires - the rest are marked fired without a signal, so
+        // a gap in usage doesn't dump a backlog of stale prompts at once.
+        // Also fires a one-time post-event reflection prompt (claim 49 of the
+        // source document) once the event date has passed.
+        function checkCountdownMilestones() {
+            let fired = false;
+
+            appState.countdownGoals.forEach(goal => {
+                if (goal.progressState !== 'active') return;
+                const remaining = daysUntil(goal.eventDate);
+
+                if (remaining < 0) {
+                    if (!goal.firedMilestones.includes('post')) {
+                        const affectedPlayers = goal.scope === 'team' ? appState.players : appState.players.filter(p => p.number === goal.scope);
+                        affectedPlayers.forEach(player => {
+                            appState.focusSignals.push({
+                                player: player,
+                                source: 'countdown',
+                                category: 'mental',
+                                metric: 'countdown_milestone',
+                                value: null,
+                                priority: 'watch',
+                                insight: `Looking back on ${goal.eventName}: what's one thing you're proud of, and one thing to work on next time?`,
+                                tags: ['resilience'],
+                                flaggedBy: 'Countdown',
+                                flaggedDate: new Date().toISOString(),
+                                sourceCountdownId: goal.id,
+                                sourceCountdownName: goal.eventName,
+                                milestoneLabel: 'post-event reflection'
+                            });
+                        });
+                        goal.firedMilestones.push('post');
+                        goal.progressState = 'completed';
+                        fired = true;
+                    }
+                    return;
+                }
+
+                const due = COUNTDOWN_MILESTONES.filter(m => remaining <= m.day && !goal.firedMilestones.includes(m.day));
+                if (due.length === 0) return;
+
+                const nearest = due.reduce((a, b) => (a.day < b.day ? a : b));
+                fireCountdownMilestone(goal, nearest);
+                due.forEach(m => goal.firedMilestones.push(m.day));
+                fired = true;
+            });
+
+            if (fired) saveState();
+        }
+
+        function renderCountdowns() {
+            const container = document.getElementById('countdownContent');
+            if (!container) return;
+
+            const active = appState.countdownGoals.filter(g => g.progressState === 'active');
+            const inactive = appState.countdownGoals.filter(g => g.progressState !== 'active');
+
+            function goalCard(goal) {
+                const remaining = daysUntil(goal.eventDate);
+                const scopeLabel = goal.scope === 'team' ? '👥 Whole Team' : (() => {
+                    const p = appState.players.find(pl => pl.number === goal.scope);
+                    return p ? `👤 ${p.first} ${p.last} #${p.number}` : '👤 Player';
+                })();
+                const timeLabel = goal.progressState !== 'active' ? (goal.progressState === 'completed' ? 'Completed' : 'Archived')
+                    : remaining > 0 ? `${remaining} day${remaining !== 1 ? 's' : ''} to go`
+                    : remaining === 0 ? 'Today' : `${Math.abs(remaining)} day${Math.abs(remaining) !== 1 ? 's' : ''} ago`;
+
+                return `
+                    <div class="player-card" style="margin-bottom: 15px;">
+                        <div style="display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 10px;">
+                            <div>
+                                <h3 style="margin-bottom: 5px;">${escapeHtml(goal.eventName)}</h3>
+                                <div style="font-size: 13px; color: #7f8c8d;">
+                                    ${scopeLabel} • ${new Date(goal.eventDate + 'T00:00:00').toLocaleDateString()}
+                                    ${goal.preparationFocus ? `<br>Focus: ${escapeHtml(goal.preparationFocus)}` : ''}
+                                </div>
+                            </div>
+                            <div style="text-align: right;">
+                                <div style="font-size: 20px; font-weight: bold; color: ${goal.progressState === 'active' ? '#3498db' : '#7f8c8d'};">${timeLabel}</div>
+                                ${goal.progressState === 'active' ? `<button class="btn btn-secondary" style="padding: 4px 10px; font-size: 11px; margin-top: 5px;" onclick="archiveCountdown(${goal.id})">Archive</button>` : ''}
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }
+
+            container.innerHTML = `
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; flex-wrap: wrap; gap: 10px;">
+                    <h2 style="color: #2c3e50; margin: 0;">⏳ Countdown Goals</h2>
+                    <button class="btn btn-success" onclick="openAddCountdownModal()">➕ New Countdown</button>
+                </div>
+                ${active.length === 0 ? `
+                    <div class="player-card" style="text-align: center; padding: 40px;">
+                        <div style="font-size: 48px; margin-bottom: 15px;">⏳</div>
+                        <h3 style="margin-bottom: 10px;">No active countdowns</h3>
+                        <p style="color: #7f8c8d;">Create one for tryouts, a season opener, a tournament, or any target event - the team or one player will get milestone prompts as it approaches.</p>
+                    </div>
+                ` : active.sort((a, b) => daysUntil(a.eventDate) - daysUntil(b.eventDate)).map(goalCard).join('')}
+                ${inactive.length > 0 ? `
+                    <h3 style="margin: 25px 0 15px; color: #7f8c8d;">Past Countdowns</h3>
+                    ${inactive.sort((a, b) => new Date(b.eventDate) - new Date(a.eventDate)).map(goalCard).join('')}
+                ` : ''}
+            `;
+        }
+
+        // Nearest active countdown relevant to a given player (team-scoped or
+        // that player specifically), for the athlete/parent "upcoming event" banner.
+        function getActiveCountdownForPlayer(player) {
+            const relevant = appState.countdownGoals.filter(g =>
+                g.progressState === 'active' && (g.scope === 'team' || g.scope === player.number)
+            );
+            if (relevant.length === 0) return null;
+            return relevant.reduce((a, b) => (daysUntil(a.eventDate) <= daysUntil(b.eventDate) ? a : b));
+        }
+
+        function renderCountdownBanner(containerId, player) {
+            const container = document.getElementById(containerId);
+            if (!container) return;
+
+            const goal = getActiveCountdownForPlayer(player);
+            if (!goal) { container.innerHTML = ''; return; }
+
+            const remaining = daysUntil(goal.eventDate);
+            const timeLabel = remaining > 1 ? `${remaining} days to go` : remaining === 1 ? '1 day to go' : remaining === 0 ? 'Today!' : `${Math.abs(remaining)} day${Math.abs(remaining) !== 1 ? 's' : ''} ago`;
+
+            container.innerHTML = `
+                <div class="player-card" style="margin-bottom: 20px; border-left: 4px solid #3498db; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+                    <div>
+                        <div style="font-size: 12px; color: #7f8c8d; text-transform: uppercase;">Upcoming</div>
+                        <div style="font-size: 16px; font-weight: 600; color: #2c3e50;">⏳ ${escapeHtml(goal.eventName)}</div>
+                    </div>
+                    <div style="font-size: 20px; font-weight: bold; color: #3498db;">${timeLabel}</div>
+                </div>
+            `;
+        }
+
         // Render Team Overview
         function renderTeamOverview() {
             if (appState.players.length === 0) {
@@ -1591,6 +1898,8 @@
                                         keyStatText = `🎥 From video`;
                                     } else if (signal.metric === 'check_in') {
                                         keyStatText = signal.source === 'athlete' ? `🙋 Self check-in` : `👪 Parent check-in`;
+                                    } else if (signal.metric === 'countdown_milestone') {
+                                        keyStatText = `⏳ ${signal.milestoneLabel || 'Countdown'}`;
                                     } else {
                                         keyStatText = `AVG: ${signal.player.avg.toFixed(3)}`;
                                     }
@@ -1663,6 +1972,11 @@
                     sourceBadge = `<span style="background: #ecf0f1; color: #2c3e50; padding: 3px 8px; border-radius: 4px; font-size: 11px;">🙋 Athlete check-in</span>`;
                 } else if (signal.source === 'parent') {
                     sourceBadge = `<span style="background: #ecf0f1; color: #2c3e50; padding: 3px 8px; border-radius: 4px; font-size: 11px;">👪 Parent check-in</span>`;
+                } else if (signal.source === 'countdown') {
+                    const sourceCountdownExists = appState.countdownGoals.some(g => g.id === signal.sourceCountdownId);
+                    sourceBadge = sourceCountdownExists
+                        ? `<span style="background: #ecf0f1; color: #2c3e50; padding: 3px 8px; border-radius: 4px; font-size: 11px; cursor: pointer;" onclick="document.querySelector('[data-tab=\\'countdown\\']').click();">⏳ ${escapeHtml(signal.sourceCountdownName || 'countdown')}${signal.milestoneLabel ? ' - ' + escapeHtml(signal.milestoneLabel) : ''}</span>`
+                        : `<span style="background: #ecf0f1; color: #2c3e50; padding: 3px 8px; border-radius: 4px; font-size: 11px;">⏳ Countdown (removed)</span>`;
                 }
                 
                 html += `
@@ -1686,6 +2000,7 @@
                                       signal.metric === 'coach_flagged' ? `Flagged by ${escapeHtml(signal.flaggedBy || 'Coach')} on ${new Date(signal.flaggedDate).toLocaleDateString()}` :
                                       signal.metric === 'video_comment' ? `From video review, ${new Date(signal.flaggedDate).toLocaleDateString()}` :
                                       signal.metric === 'check_in' ? `Self-reported ${new Date(signal.flaggedDate).toLocaleDateString()}` :
+                                      signal.metric === 'countdown_milestone' ? `${escapeHtml(signal.sourceCountdownName || 'Countdown')} - ${escapeHtml(signal.milestoneLabel || '')}` :
                                       `PA: ${signal.player.pa}, AVG: ${signal.player.avg.toFixed(3)}`}
                                 </div>
                             </div>
@@ -5410,7 +5725,8 @@ Example:
                         developmentPlans: localStorage.getItem('developmentPlans'),
                         seasonHistory: localStorage.getItem('seasonHistory'),
                         videos: localStorage.getItem('videos'),
-                        focusSignals: localStorage.getItem('focusSignals')
+                        focusSignals: localStorage.getItem('focusSignals'),
+                        countdownGoals: localStorage.getItem('countdownGoals')
                     }
                 };
                 
