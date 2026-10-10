@@ -11,6 +11,7 @@
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="apple-mobile-web-app-title" content="Couloak">
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3/dist/umd/supabase.js"></script>
     <style>
         * {
             margin: 0;
@@ -632,35 +633,56 @@
         <div class="login-box">
             <h1>⚾ Couloak Diesel 11U</h1>
             <p style="text-align: center; color: #7f8c8d; margin-bottom: 30px;">Development Operating System</p>
-            
-            <div class="form-group">
-                <label>I am a...</label>
-                <select id="userRole">
-                    <option value="">Select your role</option>
-                    <option value="coach">Coach</option>
-                    <option value="parent">Parent</option>
-                    <option value="athlete">Athlete</option>
-                </select>
+
+            <!-- Checking for an existing session / completing a magic-link sign-in -->
+            <div id="authLoadingStep">
+                <p style="text-align: center; color: #7f8c8d;">Loading...</p>
             </div>
 
-            <div class="form-group" id="coachPasswordGroup" style="display: none;">
-                <label>Coach Password</label>
-                <input type="password" id="coachPassword" autocomplete="current-password">
+            <!-- Default: enter email, request a sign-in link -->
+            <div id="authEmailStep" style="display: none;">
+                <div class="form-group">
+                    <label>Email</label>
+                    <input type="email" id="authEmail" placeholder="you@example.com" autocomplete="email">
+                </div>
+                <p style="color: #7f8c8d; font-size: 13px; margin-bottom: 15px;">
+                    We'll email you a link to sign in - no password to remember.
+                    Coaches, parents, and athletes all sign in the same way.
+                </p>
+                <button class="btn btn-primary" onclick="sendMagicLink()">Send me a sign-in link</button>
             </div>
 
-            <div class="form-group" id="playerSelectGroup" style="display: none;">
-                <label id="playerSelectLabel">My child is...</label>
-                <select id="playerSelect">
-                    <option value="">Select player</option>
-                </select>
+            <!-- After requesting a link -->
+            <div id="authCheckEmailStep" style="display: none;">
+                <p style="text-align: center; color: #2c3e50;">
+                    ✉️ Check your email - we sent a sign-in link to <strong id="authCheckEmailAddress"></strong>.
+                </p>
+                <button class="btn btn-secondary" style="margin-top: 15px;" onclick="showAuthStep('authEmailStep')">Use a different email</button>
             </div>
 
-            <div class="form-group" id="parentAccessCodeGroup" style="display: none;">
-                <label>Access Code</label>
-                <input type="text" id="parentAccessCode" placeholder="Ask your coach for this code" autocomplete="off">
+            <!-- Signed in, no coach exists yet on this project: one-time claim -->
+            <div id="authBootstrapCoachStep" style="display: none;">
+                <p style="color: #2c3e50; margin-bottom: 15px;">
+                    No coach account exists yet for this team. Is that you?
+                </p>
+                <button class="btn btn-primary" onclick="claimCoachRole()">Yes, set me up as the coach</button>
             </div>
 
-            <button class="btn btn-primary" onclick="login()">Enter</button>
+            <!-- Signed in, no parent_access row for this email yet -->
+            <div id="authNoAccessStep" style="display: none;">
+                <p style="text-align: center; color: #2c3e50;">
+                    Your coach hasn't granted this email access yet. Ask them to add you under Team Management.
+                </p>
+                <button class="btn btn-secondary" style="margin-top: 15px;" onclick="signOutAndReset()">Sign out</button>
+            </div>
+
+            <!-- Signed in, access requested but not yet approved -->
+            <div id="authPendingStep" style="display: none;">
+                <p style="text-align: center; color: #2c3e50;">
+                    Your access is waiting on your coach's approval.
+                </p>
+                <button class="btn btn-secondary" style="margin-top: 15px;" onclick="signOutAndReset()">Sign out</button>
+            </div>
         </div>
     </div>
 
@@ -866,15 +888,27 @@
         };
 
         // ============================================
+        // SUPABASE CONNECTION
+        // ============================================
+        // The anon/public key below is designed to be shipped client-side -
+        // it has no access beyond what the Row Level Security policies in
+        // supabase/schema.sql grant. See that file for the schema and
+        // supabase/README.md for how it was verified.
+        const SUPABASE_URL = 'https://tfdgvkxykphpazmqpjpt.supabase.co';
+        const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRmZGd2a3h5a3BocGF6bXFwanB0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTE2NTgwNTksImV4cCI6MjEwNzIzNDA1OX0.W3A-GGLiegCDKMQp2Z9jKXj0A60Iw-dAiaIduJUUIz4';
+        const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+        // ============================================
         // PERSISTENCE (localStorage)
         // ============================================
+        // players and parentAccess have moved to Supabase (see the AUTH
+        // section below) - everything else here still lives in
+        // localStorage, per browser/device, until it's migrated too.
 
         const STORAGE_KEYS = {
-            players: 'players',
             seasons: 'seasons',
             currentSeasonId: 'currentSeason',
             seasonHistory: 'seasonHistory',
-            parentAccess: 'parentAccess',
             plans: 'developmentPlans',
             pendingParentRequests: 'pendingParentRequests',
             videos: 'videos',
@@ -882,15 +916,14 @@
             countdownGoals: 'countdownGoals'
         };
 
-        // Persist the coach-editable parts of appState. Call after any
-        // mutation to players/seasons/parentAccess/plans/pendingParentRequests/videos/focusSignals.
+        // Persist the coach-editable parts of appState that still live in
+        // localStorage. Call after any mutation to
+        // seasons/plans/pendingParentRequests/videos/focusSignals/countdownGoals.
         function saveState() {
             try {
-                localStorage.setItem(STORAGE_KEYS.players, JSON.stringify(appState.players));
                 localStorage.setItem(STORAGE_KEYS.seasons, JSON.stringify(appState.seasons));
                 localStorage.setItem(STORAGE_KEYS.currentSeasonId, appState.currentSeasonId);
                 localStorage.setItem(STORAGE_KEYS.seasonHistory, JSON.stringify(appState.seasonHistory));
-                localStorage.setItem(STORAGE_KEYS.parentAccess, JSON.stringify(appState.parentAccess));
                 localStorage.setItem(STORAGE_KEYS.plans, JSON.stringify(appState.plans));
                 localStorage.setItem(STORAGE_KEYS.pendingParentRequests, JSON.stringify(appState.pendingParentRequests));
                 localStorage.setItem(STORAGE_KEYS.videos, JSON.stringify(appState.videos));
@@ -905,9 +938,6 @@
         // Fields with nothing saved keep whatever default was already set on appState.
         function loadState() {
             try {
-                const storedPlayers = localStorage.getItem(STORAGE_KEYS.players);
-                if (storedPlayers) appState.players = JSON.parse(storedPlayers);
-
                 const storedSeasons = localStorage.getItem(STORAGE_KEYS.seasons);
                 if (storedSeasons) appState.seasons = JSON.parse(storedSeasons);
 
@@ -917,8 +947,7 @@
                 const storedSeasonHistory = localStorage.getItem(STORAGE_KEYS.seasonHistory);
                 if (storedSeasonHistory) appState.seasonHistory = JSON.parse(storedSeasonHistory);
 
-                const storedParentAccess = localStorage.getItem(STORAGE_KEYS.parentAccess);
-                if (storedParentAccess) appState.parentAccess = JSON.parse(storedParentAccess);
+                // parentAccess now loads from Supabase (loadParentAccessFromSupabase).
 
                 const storedPlans = localStorage.getItem(STORAGE_KEYS.plans);
                 if (storedPlans) appState.plans = JSON.parse(storedPlans);
@@ -930,39 +959,18 @@
                 if (storedVideos) appState.videos = JSON.parse(storedVideos);
 
                 const storedFocusSignals = localStorage.getItem(STORAGE_KEYS.focusSignals);
-                if (storedFocusSignals) {
-                    appState.focusSignals = JSON.parse(storedFocusSignals);
-                    // Each signal's embedded player is a snapshot after JSON
-                    // round-tripping, not a live reference - repoint it at the
-                    // real player object so later edits (name, number) show up
-                    // instead of the signal silently going stale.
-                    appState.focusSignals.forEach(signal => {
-                        const livePlayer = appState.players.find(p => p.number === signal.player.number);
-                        if (livePlayer) signal.player = livePlayer;
-                    });
-                }
+                // Each signal's embedded player is a snapshot after JSON
+                // round-tripping, not a live reference. Players now load
+                // from Supabase *after* this function runs, so the
+                // relinking pass happens in relinkFocusSignalPlayers()
+                // once the roster is actually available, not here.
+                if (storedFocusSignals) appState.focusSignals = JSON.parse(storedFocusSignals);
 
                 const storedCountdownGoals = localStorage.getItem(STORAGE_KEYS.countdownGoals);
                 if (storedCountdownGoals) appState.countdownGoals = JSON.parse(storedCountdownGoals);
             } catch (error) {
                 console.error('Load error:', error);
             }
-        }
-
-        // ============================================
-        // AUTH (coach password + per-player access codes)
-        // ============================================
-        // NOTE: this is a client-side-only, backend-less app, so none of this
-        // is cryptographically secure against someone determined to read the
-        // page source — it exists to stop casual/accidental access, not a
-        // motivated attacker.
-
-        const COACH_PASSWORD_HASH_KEY = 'coachPasswordHash'; // deliberately NOT in STORAGE_KEYS/backups
-
-        async function hashText(text) {
-            const data = new TextEncoder().encode(text);
-            const hashBuffer = await crypto.subtle.digest('SHA-256', data);
-            return Array.from(new Uint8Array(hashBuffer)).map(b => b.toString(16).padStart(2, '0')).join('');
         }
 
         // Escape untrusted text before interpolating it into an innerHTML template
@@ -979,163 +987,305 @@
                 .replace(/'/g, '&#39;');
         }
 
-        function generateAccessCode() {
-            const chars = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'; // no 0/O/1/I/L - avoids look-alike mixups
-            let code = '';
-            for (let i = 0; i < 6; i++) {
-                code += chars[Math.floor(Math.random() * chars.length)];
-            }
-            return code;
-        }
-
-        window.changeCoachPassword = async function() {
-            const storedHash = localStorage.getItem(COACH_PASSWORD_HASH_KEY);
-
-            if (storedHash) {
-                const currentPassword = prompt('Enter your current coach password:');
-                if (!currentPassword) return;
-                if (await hashText(currentPassword) !== storedHash) {
-                    alert('Incorrect current password.');
-                    return;
-                }
-            }
-
-            const newPassword = prompt('Enter a new coach password:');
-            if (!newPassword) return;
-            const confirmPassword = prompt('Confirm new coach password:');
-            if (newPassword !== confirmPassword) {
-                alert('Passwords did not match - password was not changed.');
-                return;
-            }
-
-            localStorage.setItem(COACH_PASSWORD_HASH_KEY, await hashText(newPassword));
-            alert('Coach password updated.');
-        }
-
-        // No roster ships in the source - a fresh browser starts empty and the
-        // coach adds players (Team Management -> Add Player) or imports a
-        // backup. Real player names/stats belong in localStorage or a backup
-        // file, never committed to source control (this repo is public).
-        appState.players = [];
-
-        // Restore any previously saved coach data (overrides the empty roster above if present)
+        // Restore the localStorage-backed parts of appState (players and
+        // parentAccess now come from Supabase instead - see AUTH below).
         loadState();
-
-        // Ensure every player has an access code (covers older saved rosters)
-        let backfilledAccessCodes = false;
-        appState.players.forEach(player => {
-            if (!player.accessCode) {
-                player.accessCode = generateAccessCode();
-                backfilledAccessCodes = true;
-            }
-        });
-        if (backfilledAccessCodes) saveState();
 
         // Initialize season data
         initializeSeasonData();
 
-        // Login
-        document.getElementById('userRole').addEventListener('change', (e) => {
-            const playerGroup = document.getElementById('playerSelectGroup');
-            const playerLabel = document.getElementById('playerSelectLabel');
-            const accessCodeGroup = document.getElementById('parentAccessCodeGroup');
-            const coachPasswordGroup = document.getElementById('coachPasswordGroup');
+        // ============================================
+        // AUTH (Supabase email magic link)
+        // ============================================
+        // Coaches, parents, and athletes all sign in the same way: enter an
+        // email, click the link it emails you. Which of those three you are
+        // (coach, or a parent/athlete linked to one specific player) is
+        // resolved from the `profiles` and `parent_access` tables after
+        // sign-in - gated server-side by the Row Level Security policies in
+        // supabase/schema.sql, never something this client decides on its own.
 
-            if (e.target.value === 'parent' || e.target.value === 'athlete') {
-                playerGroup.style.display = 'block';
-                playerLabel.textContent = e.target.value === 'athlete' ? 'I am...' : 'My child is...';
-                accessCodeGroup.style.display = 'block';
-                coachPasswordGroup.style.display = 'none';
-                const select = document.getElementById('playerSelect');
-                select.innerHTML = '<option value="">Select player</option>';
-                appState.players.forEach(p => {
-                    select.innerHTML += `<option value="${p.number}">#${p.number} ${p.first} ${p.last}</option>`;
+        function showAuthStep(stepId) {
+            ['authLoadingStep', 'authEmailStep', 'authCheckEmailStep', 'authBootstrapCoachStep', 'authNoAccessStep', 'authPendingStep']
+                .forEach(id => {
+                    const el = document.getElementById(id);
+                    if (el) el.style.display = id === stepId ? 'block' : 'none';
                 });
-            } else if (e.target.value === 'coach') {
-                playerGroup.style.display = 'none';
-                accessCodeGroup.style.display = 'none';
-                coachPasswordGroup.style.display = 'block';
-            } else {
-                playerGroup.style.display = 'none';
-                accessCodeGroup.style.display = 'none';
-                coachPasswordGroup.style.display = 'none';
-            }
-        });
+        }
 
-        async function login() {
-            const role = document.getElementById('userRole').value;
-            if (!role) {
-                alert('Please select your role');
+        window.sendMagicLink = async function() {
+            const email = document.getElementById('authEmail').value.trim();
+            if (!email) {
+                alert('Please enter your email');
                 return;
             }
 
-            if (role === 'coach') {
-                const enteredPassword = document.getElementById('coachPassword').value;
-                const storedHash = localStorage.getItem(COACH_PASSWORD_HASH_KEY);
+            const { error } = await supabaseClient.auth.signInWithOtp({
+                email,
+                options: { emailRedirectTo: location.href.split('#')[0] }
+            });
 
-                if (!storedHash) {
-                    // First time on this device/browser: whoever is here sets the coach password
-                    const wantsSetup = confirm(
-                        'No coach password has been set on this device yet.\n\n' +
-                        'Set one now? Anyone who knows it will have full coach access.'
-                    );
-                    if (!wantsSetup) return;
+            if (error) {
+                alert(`Could not send sign-in link: ${error.message}`);
+                return;
+            }
 
-                    const newPassword = prompt('Enter a new coach password:');
-                    if (!newPassword) return;
-                    const confirmPassword = prompt('Confirm coach password:');
-                    if (newPassword !== confirmPassword) {
-                        alert('Passwords did not match - please try again.');
-                        return;
-                    }
+            document.getElementById('authCheckEmailAddress').textContent = email;
+            showAuthStep('authCheckEmailStep');
+        }
 
-                    localStorage.setItem(COACH_PASSWORD_HASH_KEY, await hashText(newPassword));
-                    alert('Coach password set! Logging you in now.');
+        window.signOutAndReset = async function() {
+            await supabaseClient.auth.signOut();
+            location.reload();
+        }
+
+        // One-time bootstrap: the very first person to sign in and claim
+        // this button becomes the coach. RLS (any_coach_profile_exists() in
+        // supabase/schema.sql) permanently closes this off the moment one
+        // coach profile exists, so it can't be used to self-promote later.
+        window.claimCoachRole = async function() {
+            const { data: { user } } = await supabaseClient.auth.getUser();
+            if (!user) return;
+
+            const { error } = await supabaseClient
+                .from('profiles')
+                .insert({ id: user.id, email: user.email, role: 'coach' });
+
+            if (error) {
+                alert('Could not set up the coach account - someone may have just claimed it. Reloading.');
+                location.reload();
+                return;
+            }
+
+            await completeSignIn(user);
+        }
+
+        function dbPlayerToApp(row) {
+            return {
+                id: row.id,
+                number: row.jersey_number,
+                first: row.first_name,
+                last: row.last_name,
+                pa: row.pa, ab: row.ab, avg: Number(row.avg),
+                k: row.k, bb: row.bb, h: row.h,
+                ip: Number(row.ip), bf: row.bf, er: row.er,
+                pitchK: row.pitch_k, pitchBB: row.pitch_bb
+            };
+        }
+
+        async function loadPlayersFromSupabase() {
+            const { data, error } = await supabaseClient
+                .from('players')
+                .select('*')
+                .order('jersey_number');
+
+            if (error) {
+                console.error('Failed to load roster from Supabase:', error);
+                alert('Could not load the roster from the server - check your connection and try reloading.');
+                appState.players = [];
+                return;
+            }
+
+            appState.players = (data || []).map(dbPlayerToApp);
+            relinkFocusSignalPlayers();
+        }
+
+        // focusSignals loaded from localStorage carry a JSON snapshot of
+        // their player, not a live reference - repoint each one at the
+        // real player object (loaded from Supabase) so later edits show up
+        // instead of the signal silently going stale.
+        function relinkFocusSignalPlayers() {
+            appState.focusSignals.forEach(signal => {
+                const livePlayer = appState.players.find(p => p.number === signal.player.number);
+                if (livePlayer) signal.player = livePlayer;
+            });
+        }
+
+        async function loadParentAccessFromSupabase() {
+            const { data, error } = await supabaseClient
+                .from('parent_access')
+                .select('*')
+                .order('requested_at', { ascending: false });
+
+            if (error) {
+                console.error('Failed to load parent access from Supabase:', error);
+                appState.parentAccess = [];
+                return;
+            }
+
+            // Coach-granted access is always created pre-approved (see
+            // sendParentInvite) - a 'pending' row here would only come from
+            // a self-service request flow that isn't wired to Supabase yet
+            // (see appState.pendingParentRequests, still localStorage-only).
+            appState.parentAccess = (data || [])
+                .filter(row => row.status === 'approved')
+                .map(row => {
+                    const player = appState.players.find(p => p.id === row.player_id);
+                    return {
+                        parentName: row.parent_name,
+                        parentEmail: row.parent_email,
+                        playerNumber: player ? player.number : null,
+                        relationship: row.relationship,
+                        status: row.status,
+                        requestDate: row.requested_at,
+                        approvedDate: row.approved_at,
+                        supabaseId: row.id
+                    };
+                });
+        }
+
+        function appPlayerToDbRow(player) {
+            return {
+                jersey_number: player.number,
+                first_name: player.first,
+                last_name: player.last,
+                pa: player.pa, ab: player.ab, avg: player.avg,
+                k: player.k, bb: player.bb, h: player.h,
+                ip: player.ip, bf: player.bf, er: player.er,
+                pitch_k: player.pitchK, pitch_bb: player.pitchBB
+            };
+        }
+
+        // Inserts a new player and stamps the Supabase-assigned id back
+        // onto the in-memory object, so later edits/deletes can target it.
+        async function insertPlayerToSupabase(player) {
+            const { data, error } = await supabaseClient
+                .from('players')
+                .insert(appPlayerToDbRow(player))
+                .select()
+                .single();
+
+            if (error) throw error;
+            player.id = data.id;
+        }
+
+        async function updatePlayerInSupabase(player) {
+            const { error } = await supabaseClient
+                .from('players')
+                .update(appPlayerToDbRow(player))
+                .eq('id', player.id);
+
+            if (error) throw error;
+        }
+
+        async function deletePlayerFromSupabase(player) {
+            const { error } = await supabaseClient
+                .from('players')
+                .delete()
+                .eq('id', player.id);
+
+            if (error) throw error;
+        }
+
+        // Coach-granted parent/athlete access, created pre-approved. See
+        // loadParentAccessFromSupabase() for how this is read back.
+        async function insertParentAccessToSupabase(player, name, email, relationship) {
+            const { error } = await supabaseClient
+                .from('parent_access')
+                .insert({
+                    player_id: player.id,
+                    parent_name: name,
+                    parent_email: email,
+                    relationship: relationship,
+                    status: 'approved',
+                    approved_at: new Date().toISOString()
+                });
+
+            if (error) throw error;
+        }
+
+        async function deleteParentAccessFromSupabase(supabaseId) {
+            const { error } = await supabaseClient
+                .from('parent_access')
+                .delete()
+                .eq('id', supabaseId);
+
+            if (error) throw error;
+        }
+
+        // Resolves a signed-in Supabase user into an app role (coach, or
+        // parent/athlete linked to one player) and, once resolved, starts
+        // the app exactly like the old password/access-code login() used to.
+        async function completeSignIn(user) {
+            const { data: profile } = await supabaseClient
+                .from('profiles')
+                .select('role')
+                .eq('id', user.id)
+                .maybeSingle();
+
+            if (profile) {
+                if (profile.role === 'coach') {
+                    await enterAsCoach();
                 } else {
-                    if (!enteredPassword) {
-                        alert('Please enter the coach password');
-                        return;
-                    }
-                    if (await hashText(enteredPassword) !== storedHash) {
-                        alert('Incorrect coach password');
-                        return;
-                    }
+                    await enterAsLinkedPlayer(user);
                 }
+                return;
             }
 
-            if (role === 'parent' || role === 'athlete') {
-                const playerId = document.getElementById('playerSelect').value;
-                if (!playerId) {
-                    alert(role === 'athlete' ? 'Please select your name' : 'Please select your child');
-                    return;
+            // No profile yet - first time this email has ever signed in.
+            // Has the coach already granted this email access to a player?
+            const { data: access } = await supabaseClient
+                .from('parent_access')
+                .select('status')
+                .ilike('parent_email', user.email);
+
+            if (access && access.length > 0) {
+                if (access.some(a => a.status === 'approved')) {
+                    const { error } = await supabaseClient
+                        .from('profiles')
+                        .insert({ id: user.id, email: user.email, role: 'parent' });
+                    if (error) {
+                        alert(`Could not finish setting up your account: ${error.message}`);
+                        return;
+                    }
+                    await enterAsLinkedPlayer(user);
+                } else {
+                    showAuthStep('authPendingStep');
                 }
-
-                const player = appState.players.find(p => p.number == playerId);
-                const enteredCode = document.getElementById('parentAccessCode').value.trim().toUpperCase();
-
-                if (!enteredCode) {
-                    alert('Please enter the access code your coach gave you');
-                    return;
-                }
-
-                if (enteredCode !== player.accessCode) {
-                    alert(`Incorrect access code for ${player.first} ${player.last}.\n\nAsk your coach for the current access code.`);
-                    return;
-                }
-
-                appState.currentPlayer = player;
+                return;
             }
 
-            appState.currentRole = role;
-            appState.currentUser = role === 'coach' ? 'Coach' :
-                role === 'athlete' ? appState.currentPlayer.first :
-                `${appState.currentPlayer.first}'s Parent`;
+            const { data: coachExists } = await supabaseClient.rpc('any_coach_profile_exists');
+            showAuthStep(coachExists ? 'authNoAccessStep' : 'authBootstrapCoachStep');
+        }
 
+        async function enterAsCoach() {
+            appState.currentRole = 'coach';
+            appState.currentUser = 'Coach';
+            await loadPlayersFromSupabase();
+            await loadParentAccessFromSupabase();
+            enterApp();
+        }
+
+        async function enterAsLinkedPlayer(user) {
+            await loadPlayersFromSupabase();
+
+            const { data: access } = await supabaseClient
+                .from('parent_access')
+                .select('player_id, relationship')
+                .ilike('parent_email', user.email)
+                .eq('status', 'approved')
+                .limit(1);
+
+            const player = access && access.length > 0
+                ? appState.players.find(p => p.id === access[0].player_id)
+                : null;
+
+            if (!player) {
+                showAuthStep('authNoAccessStep');
+                return;
+            }
+
+            appState.currentPlayer = player;
+            appState.currentRole = access[0].relationship; // 'parent' or 'athlete'
+            appState.currentUser = access[0].relationship === 'athlete' ? player.first : `${player.first}'s Parent`;
+            enterApp();
+        }
+
+        function enterApp() {
             document.getElementById('loginScreen').style.display = 'none';
             document.getElementById('appContainer').style.display = 'block';
             document.getElementById('userRoleDisplay').textContent = `Logged in as: ${appState.currentUser}`;
 
-            // Update season display
             updateSeasonDisplay();
 
             // Regenerate stat signals and fire any countdown milestones that
@@ -1144,9 +1294,9 @@
             generateFocusSignals();
             checkCountdownMilestones();
 
-            if (role === 'coach') {
+            if (appState.currentRole === 'coach') {
                 showCoachView();
-            } else if (role === 'athlete') {
+            } else if (appState.currentRole === 'athlete') {
                 showAthleteView();
             } else {
                 showParentView();
@@ -1163,8 +1313,32 @@
         }
 
         function logout() {
-            location.reload();
+            supabaseClient.auth.signOut().finally(() => location.reload());
         }
+
+        let authResolving = false;
+
+        // Runs once immediately on page load with whatever session exists
+        // (none, or a restored one), and again on sign-in/sign-out -
+        // including completing a magic-link redirect. Ignored while the app
+        // is already showing (a background token refresh shouldn't reset
+        // the current view).
+        supabaseClient.auth.onAuthStateChange(async (event, session) => {
+            const loginScreen = document.getElementById('loginScreen');
+            if (loginScreen.style.display === 'none') return;
+            if (authResolving) return;
+
+            authResolving = true;
+            try {
+                if (session) {
+                    await completeSignIn(session.user);
+                } else {
+                    showAuthStep('authEmailStep');
+                }
+            } finally {
+                authResolving = false;
+            }
+        });
 
         // Show Views
         function showCoachView() {
@@ -3997,19 +4171,6 @@ Example:
                     </div>
                 </div>
 
-                <!-- Security -->
-                <div style="display: grid; grid-template-columns: 1fr; gap: 20px; margin-bottom: 30px;">
-                    <div class="player-card" style="border-top: 3px solid #3498db;">
-                        <h3 style="margin-bottom: 15px;">🔒 Security</h3>
-                        <p style="color: #7f8c8d; margin-bottom: 15px; font-size: 14px;">
-                            The coach password gates the Coach role at login. Access codes (shown in the roster below) gate each player's Parent view.
-                        </p>
-                        <button onclick="changeCoachPassword()" class="btn btn-secondary">
-                            🔑 Change Coach Password
-                        </button>
-                    </div>
-                </div>
-
                 <!-- Data Backup & Restore -->
                 <div style="display: grid; grid-template-columns: 1fr; gap: 20px; margin-bottom: 30px;">
                     <div class="player-card" style="border-top: 3px solid #10b981;">
@@ -4061,7 +4222,6 @@ Example:
                                     <th>#</th>
                                     <th>Player Name</th>
                                     <th>Stats</th>
-                                    <th>Access Code</th>
                                     <th>Parent Access</th>
                                     <th>Actions</th>
                                 </tr>
@@ -4078,12 +4238,6 @@ Example:
                                             <td>${player.first} ${player.last}</td>
                                             <td style="font-size: 12px; color: #7f8c8d;">
                                                 ${player.pa} PA, ${player.avg.toFixed(3)} AVG
-                                            </td>
-                                            <td>
-                                                <code style="font-weight: 600; letter-spacing: 1px;">${player.accessCode}</code><br>
-                                                <button class="btn btn-secondary" onclick="regenerateAccessCode(${player.number})" style="padding: 4px 8px; font-size: 11px; margin-top: 4px;">
-                                                    🔄 New Code
-                                                </button>
                                             </td>
                                             <td>
                                                 ${parentAccounts.length > 0 ? `
@@ -4233,7 +4387,7 @@ Example:
         }
 
         // Save New Player
-        window.saveNewPlayer = function() {
+        window.saveNewPlayer = async function() {
             const number = parseInt(document.getElementById('newPlayerNumber').value);
             const first = document.getElementById('newPlayerFirst').value.trim();
             const last = document.getElementById('newPlayerLast').value.trim();
@@ -4264,13 +4418,18 @@ Example:
                 bf: 0,
                 er: 0,
                 pitchK: 0,
-                pitchBB: 0,
-                accessCode: generateAccessCode()
+                pitchBB: 0
             };
+
+            try {
+                await insertPlayerToSupabase(newPlayer);
+            } catch (error) {
+                alert(`Could not add the player: ${error.message}`);
+                return;
+            }
 
             appState.players.push(newPlayer);
             appState.players.sort((a, b) => a.number - b.number);
-            saveState();
 
             // Regenerate signals
             generateFocusSignals();
@@ -4318,7 +4477,7 @@ Example:
         }
 
         // Save Edited Player
-        window.saveEditedPlayer = function() {
+        window.saveEditedPlayer = async function() {
             const originalNumber = parseInt(document.getElementById('originalPlayerNumber').value);
             const newNumber = parseInt(document.getElementById('editPlayerNumber').value);
             const first = document.getElementById('editPlayerFirst').value.trim();
@@ -4338,19 +4497,30 @@ Example:
             const player = appState.players.find(p => p.number === originalNumber);
             if (!player) return;
 
+            const previousState = { number: player.number, first: player.first, last: player.last };
             player.number = newNumber;
             player.first = first;
             player.last = last;
 
+            try {
+                await updatePlayerInSupabase(player);
+            } catch (error) {
+                Object.assign(player, previousState);
+                alert(`Could not save changes: ${error.message}`);
+                return;
+            }
+
             appState.players.sort((a, b) => a.number - b.number);
 
-            // Update parent access records
+            // Update in-memory parent access records to match (the
+            // underlying Supabase rows link by player id, not number, so
+            // they don't need their own update - this just keeps the
+            // already-loaded appState.parentAccess display in sync)
             appState.parentAccess.forEach(parent => {
                 if (parent.playerNumber === originalNumber) {
                     parent.playerNumber = newNumber;
                 }
             });
-            saveState();
 
             generateFocusSignals();
             renderTeamManagement();
@@ -4362,7 +4532,7 @@ Example:
         }
 
         // Delete Player
-        window.deletePlayer = function(playerNumber) {
+        window.deletePlayer = async function(playerNumber) {
             const player = appState.players.find(p => p.number === playerNumber);
             if (!player) return;
 
@@ -4373,6 +4543,15 @@ Example:
             );
 
             if (!confirmDelete) return;
+
+            try {
+                // The database cascades the delete to this player's
+                // parent_access rows automatically (see schema.sql).
+                await deletePlayerFromSupabase(player);
+            } catch (error) {
+                alert(`Could not delete the player: ${error.message}`);
+                return;
+            }
 
             // Remove player
             appState.players = appState.players.filter(p => p.number !== playerNumber);
@@ -4393,44 +4572,35 @@ Example:
             alert(`${player.first} ${player.last} has been removed from the roster.`);
         }
 
-        // Regenerate a player's parent access code (invalidates the old code for everyone)
-        window.regenerateAccessCode = function(playerNumber) {
-            const player = appState.players.find(p => p.number === playerNumber);
-            if (!player) return;
-
-            const confirmRegenerate = confirm(
-                `Generate a new access code for ${player.first} ${player.last}?\n\n` +
-                `The old code (${player.accessCode}) will stop working immediately for anyone still using it - ` +
-                `including any parent you haven't cut off on purpose. Share the new code with whoever should still have access.`
-            );
-            if (!confirmRegenerate) return;
-
-            player.accessCode = generateAccessCode();
-            saveState();
-            renderTeamManagement();
-            alert(`New access code for ${player.first} ${player.last}: ${player.accessCode}`);
-        }
-
         // Open Invite Parent Modal
         window.openInviteParentModal = function() {
             document.getElementById('messageModalContent').innerHTML = `
-                <h2 style="margin-bottom: 20px;">📧 Invite Parent</h2>
-                
+                <h2 style="margin-bottom: 20px;">📧 Invite Parent or Athlete</h2>
+
                 <div class="form-group">
-                    <label>Parent Name *</label>
+                    <label>Name *</label>
                     <input type="text" id="inviteParentName" placeholder="e.g., John Martinez" required>
                 </div>
 
                 <div class="form-group">
-                    <label>Parent Email *</label>
+                    <label>Email *</label>
                     <input type="email" id="inviteParentEmail" placeholder="e.g., john.martinez@email.com" required>
+                    <p style="color: #7f8c8d; font-size: 12px; margin-top: 4px;">They'll sign in with this exact email via a link we send them - no password to set up.</p>
                 </div>
 
                 <div class="form-group">
-                    <label>Child (Player) *</label>
+                    <label>They are the...</label>
+                    <select id="inviteRelationship">
+                        <option value="parent">Parent</option>
+                        <option value="athlete">Athlete (the player themselves)</option>
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label>Player *</label>
                     <select id="invitePlayerNumber" required>
                         <option value="">-- Select Player --</option>
-                        ${appState.players.map(p => 
+                        ${appState.players.map(p =>
                             `<option value="${p.number}">#${p.number} ${p.first} ${p.last}</option>`
                         ).join('')}
                     </select>
@@ -4438,8 +4608,8 @@ Example:
 
                 <div style="background: #e8f5e9; padding: 15px; border-radius: 6px; margin-bottom: 20px;">
                     <p style="margin: 0; font-size: 13px; color: #2c3e50;">
-                        <strong>✓ Pre-Approved:</strong> This parent will have immediate access to their child's stats, 
-                        videos, and development plans.
+                        <strong>✓ Pre-Approved:</strong> This person will have immediate access to their player's stats,
+                        videos, and development plans as soon as they sign in with this email.
                     </p>
                 </div>
 
@@ -4451,10 +4621,11 @@ Example:
             document.getElementById('messageModal').classList.add('active');
         }
 
-        // Send Parent Invite (Pre-Approve)
-        window.sendParentInvite = function() {
+        // Send Parent/Athlete Invite (Pre-Approve)
+        window.sendParentInvite = async function() {
             const name = document.getElementById('inviteParentName').value.trim();
             const email = document.getElementById('inviteParentEmail').value.trim().toLowerCase();
+            const relationship = document.getElementById('inviteRelationship').value;
             const playerNumber = parseInt(document.getElementById('invitePlayerNumber').value);
 
             if (!name || !email || !playerNumber) {
@@ -4471,24 +4642,22 @@ Example:
             );
 
             if (existing) {
-                alert('This parent already has access to this player');
+                alert('This email already has access to this player');
                 return;
             }
 
-            // Add as approved
-            appState.parentAccess.push({
-                parentName: name,
-                parentEmail: email,
-                playerNumber: playerNumber,
-                status: 'approved',
-                requestDate: new Date().toISOString(),
-                approvedDate: new Date().toISOString()
-            });
-            saveState();
+            try {
+                await insertParentAccessToSupabase(player, name, email, relationship);
+            } catch (error) {
+                alert(`Could not grant access: ${error.message}`);
+                return;
+            }
+
+            await loadParentAccessFromSupabase();
 
             renderTeamManagement();
             closeModal('messageModal');
-            alert(`Access granted! ${name} can now log in as a parent for ${player.first} ${player.last}.`);
+            alert(`Access granted! ${name} can now sign in with ${email} to see ${player.first} ${player.last}'s data.`);
         }
 
         // Approve Parent Request
@@ -4631,7 +4800,7 @@ Example:
         }
 
         // Create New Season
-        window.createNewSeason = function() {
+        window.createNewSeason = async function() {
             const name = document.getElementById('newSeasonName').value.trim();
             const startDate = document.getElementById('newSeasonStart').value;
             const endDate = document.getElementById('newSeasonEnd').value;
@@ -4678,10 +4847,13 @@ Example:
             appState.seasons.push(newSeason);
             appState.currentSeasonId = seasonId;
 
-            // Reset or clear roster
+            // Reset or clear roster - pushed to Supabase one player at a
+            // time (rosters are small), since players no longer persist
+            // through saveState()/localStorage.
+            const statFailures = [];
             if (keepRoster) {
                 // Keep players but reset stats
-                appState.players.forEach(player => {
+                for (const player of appState.players) {
                     player.pa = 0;
                     player.ab = 0;
                     player.avg = 0.000;
@@ -4693,15 +4865,36 @@ Example:
                     player.er = 0;
                     player.pitchK = 0;
                     player.pitchBB = 0;
-                });
+                    try {
+                        await updatePlayerInSupabase(player);
+                    } catch (error) {
+                        statFailures.push(`#${player.number} ${player.first} ${player.last}: ${error.message}`);
+                    }
+                }
             } else {
-                appState.players = [];
+                const notDeleted = [];
+                for (const player of appState.players) {
+                    try {
+                        await deletePlayerFromSupabase(player);
+                    } catch (error) {
+                        statFailures.push(`#${player.number} ${player.first} ${player.last}: ${error.message}`);
+                        notDeleted.push(player);
+                    }
+                }
+                appState.players = notDeleted;
+                appState.parentAccess = appState.parentAccess.filter(
+                    p => notDeleted.some(np => np.number === p.playerNumber)
+                );
             }
 
             // Reset plans and signals
             appState.plans = {};
             saveState();
             generateFocusSignals();
+
+            if (statFailures.length > 0) {
+                alert(`Some players did not save:\n\n${statFailures.join('\n')}`);
+            }
 
             // Update all views
             renderTeamManagement();
@@ -4952,7 +5145,7 @@ Example:
         }
 
         // Revoke Parent Access
-        window.revokeParentAccess = function(parentEmail, playerNumber) {
+        window.revokeParentAccess = async function(parentEmail, playerNumber) {
             const parent = appState.parentAccess.find(
                 p => p.parentEmail === parentEmail && p.playerNumber === playerNumber
             );
@@ -4960,19 +5153,24 @@ Example:
 
             const player = appState.players.find(p => p.number === playerNumber);
             const confirmRevoke = confirm(
-                `Remove ${parent.parentName} from the known-parents list for ${player.first} ${player.last}?\n\n` +
-                `Note: this only removes their name from this list - it does NOT block them from logging in, ` +
-                `since login uses ${player.first}'s access code, not a per-person password. ` +
-                `To actually cut someone off, use "New Code" to give ${player.first} a fresh access code.`
+                `Revoke ${parent.parentName}'s access to ${player.first} ${player.last}?\n\n` +
+                `This takes effect immediately - they will no longer be able to see ${player.first}'s data, ` +
+                `even if they're already signed in.`
             );
 
             if (!confirmRevoke) return;
+
+            try {
+                await deleteParentAccessFromSupabase(parent.supabaseId);
+            } catch (error) {
+                alert(`Could not revoke access: ${error.message}`);
+                return;
+            }
 
             // Remove access
             appState.parentAccess = appState.parentAccess.filter(
                 p => !(p.parentEmail === parentEmail && p.playerNumber === playerNumber)
             );
-            saveState();
 
             renderTeamManagement();
             alert(`${parent.parentName} removed from the list.`);
@@ -5630,7 +5828,7 @@ Example:
         function handleFileUpload(file) {
             const reader = new FileReader();
 
-            reader.onload = function(e) {
+            reader.onload = async function(e) {
                 let parsed;
                 try {
                     parsed = parseGameChangerCSV(e.target.result);
@@ -5654,26 +5852,39 @@ Example:
                     return;
                 }
 
-                // Update existing players (matched by jersey number, keeping their
-                // access code and any parent access intact) and add new ones.
+                // Update existing players (matched by jersey number, keeping
+                // any parent access intact) and add new ones. One row at a
+                // time against Supabase - rosters are small (a team's worth
+                // of players), so there's no need to parallelize this.
                 let addedCount = 0;
                 let updatedCount = 0;
+                const failures = [];
 
-                parsed.players.forEach(imported => {
+                for (const imported of parsed.players) {
                     const existing = appState.players.find(p => p.number === imported.number);
-                    if (existing) {
-                        Object.assign(existing, imported);
-                        updatedCount++;
-                    } else {
-                        appState.players.push({ ...imported, accessCode: generateAccessCode() });
-                        addedCount++;
+                    try {
+                        if (existing) {
+                            Object.assign(existing, imported);
+                            await updatePlayerInSupabase(existing);
+                            updatedCount++;
+                        } else {
+                            const newPlayer = { ...imported };
+                            await insertPlayerToSupabase(newPlayer);
+                            appState.players.push(newPlayer);
+                            addedCount++;
+                        }
+                    } catch (error) {
+                        failures.push(`#${imported.number} ${imported.first} ${imported.last}: ${error.message}`);
                     }
-                });
+                }
 
                 appState.players.sort((a, b) => a.number - b.number);
                 generateFocusSignals();
-                saveState();
                 showCoachView();
+
+                if (failures.length > 0) {
+                    alert(`Imported with some errors - these rows did not save:\n\n${failures.join('\n')}`);
+                }
 
                 const skippedHtml = parsed.skipped.length > 0 ? `
                     <div style="background: #fef3c7; border-left: 4px solid #f59e0b; padding: 12px; border-radius: 4px; margin-top: 15px;">
@@ -5718,16 +5929,21 @@ Example:
                 // (covers the case where nothing has triggered a save yet)
                 saveState();
 
-                // Collect all data from localStorage
+                // players and parentAccess now live in Supabase, not
+                // localStorage - included here as a read-only snapshot of
+                // the current in-memory copy for reference. Restoring a
+                // backup does NOT write these back to Supabase (see
+                // importData() below) - the roster itself is durable there
+                // already and doesn't need this file as its backup path.
                 const backupData = {
                     version: '1.0',
                     exportDate: new Date().toISOString(),
                     appName: 'Couloak Diesel Development OS',
                     data: {
-                        players: localStorage.getItem('players'),
+                        players: JSON.stringify(appState.players),
                         seasons: localStorage.getItem('seasons'),
                         currentSeason: localStorage.getItem('currentSeason'),
-                        parentAccess: localStorage.getItem('parentAccess'),
+                        parentAccess: JSON.stringify(appState.parentAccess),
                         pendingParentRequests: localStorage.getItem('pendingParentRequests'),
                         developmentPlans: localStorage.getItem('developmentPlans'),
                         seasonHistory: localStorage.getItem('seasonHistory'),
@@ -5777,6 +5993,9 @@ Example:
             // Confirm before importing (will overwrite current data)
             const confirmed = confirm(
                 '⚠️ WARNING: Importing will REPLACE all current data.\n\n' +
+                'Note: the player roster and parent access now live on the server ' +
+                'and are NOT affected by this - only videos, focus signals, countdowns, ' +
+                'plans, and season history are restored from this file.\n\n' +
                 'Make sure you have exported a backup of your current data first!\n\n' +
                 'Continue with import?'
             );
@@ -5799,8 +6018,13 @@ Example:
                         throw new Error('Invalid backup file format');
                     }
                     
-                    // Restore all data
+                    // Restore all data except players/parentAccess, which
+                    // live in Supabase now - writing them to localStorage
+                    // would do nothing (loadState() no longer reads them
+                    // from there) and risks looking like a silent restore
+                    // that didn't actually happen.
                     Object.keys(backupData.data).forEach(key => {
+                        if (key === 'players' || key === 'parentAccess') return;
                         if (backupData.data[key] !== null) {
                             localStorage.setItem(key, backupData.data[key]);
                         }

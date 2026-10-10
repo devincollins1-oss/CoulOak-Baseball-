@@ -172,6 +172,27 @@ as $$
     and lower(parent_email) = lower(auth.jwt() ->> 'email');
 $$;
 
+-- Used only to gate the one-time "claim the coach role" bootstrap
+-- insert below - true once any coach profile exists, permanently
+-- closing that path for everyone after the first one.
+create or replace function any_coach_profile_exists()
+returns boolean
+language sql
+security definer
+set search_path = public
+stable
+as $$
+  select exists (select 1 from profiles where role = 'coach');
+$$;
+
+-- Explicit rather than relying on default privileges: is_coach() and
+-- linked_player_ids() are invoked implicitly from inside RLS policies,
+-- and any_coach_profile_exists() is also called directly from the app
+-- (via PostgREST's /rpc/ endpoint) during the sign-in bootstrap check.
+grant execute on function is_coach() to authenticated;
+grant execute on function linked_player_ids() to authenticated;
+grant execute on function any_coach_profile_exists() to authenticated;
+
 -- ------------------------------------------------------------
 -- Row Level Security
 -- ------------------------------------------------------------
@@ -191,9 +212,16 @@ create policy "Users read their own profile"
   on profiles for select
   using (id = auth.uid() or is_coach());
 
+-- A user may only ever insert their own row, and may only claim the
+-- 'coach' role while no coach exists yet (the one-time setup step -
+-- see any_coach_profile_exists() above). Every sign-in after that
+-- first one can only create a 'parent' profile.
 create policy "Users create their own profile"
   on profiles for insert
-  with check (id = auth.uid());
+  with check (
+    id = auth.uid()
+    and (role = 'parent' or (role = 'coach' and not any_coach_profile_exists()))
+  );
 
 create policy "Coaches manage all profiles"
   on profiles for update
