@@ -901,8 +901,7 @@
         // Cloudflare Stream customer code (not secret - every public
         // playback URL for this account contains it). Find it in the
         // Cloudflare dashboard: Stream > any video > "Code snippets".
-        // TODO: replace with the real code once available.
-        const CLOUDFLARE_STREAM_CUSTOMER_CODE = 'REPLACE_WITH_CUSTOMER_CODE';
+        const CLOUDFLARE_STREAM_CUSTOMER_CODE = 'j6186wkbjelq0r17';
 
         function cloudflareIframeUrl(uid) {
             return `https://customer-${CLOUDFLARE_STREAM_CUSTOMER_CODE}.cloudflarestream.com/${uid}/iframe`;
