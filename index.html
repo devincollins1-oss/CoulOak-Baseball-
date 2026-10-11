@@ -898,6 +898,16 @@
         const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRmZGd2a3h5a3BocGF6bXFwanB0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTE2NTgwNTksImV4cCI6MjEwNzIzNDA1OX0.W3A-GGLiegCDKMQp2Z9jKXj0A60Iw-dAiaIduJUUIz4';
         const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
+        // Cloudflare Stream customer code (not secret - every public
+        // playback URL for this account contains it). Find it in the
+        // Cloudflare dashboard: Stream > any video > "Code snippets".
+        // TODO: replace with the real code once available.
+        const CLOUDFLARE_STREAM_CUSTOMER_CODE = 'REPLACE_WITH_CUSTOMER_CODE';
+
+        function cloudflareIframeUrl(uid) {
+            return `https://customer-${CLOUDFLARE_STREAM_CUSTOMER_CODE}.cloudflarestream.com/${uid}/iframe`;
+        }
+
         // ============================================
         // PERSISTENCE (localStorage)
         // ============================================
@@ -911,14 +921,13 @@
             seasonHistory: 'seasonHistory',
             plans: 'developmentPlans',
             pendingParentRequests: 'pendingParentRequests',
-            videos: 'videos',
             focusSignals: 'focusSignals',
             countdownGoals: 'countdownGoals'
         };
 
         // Persist the coach-editable parts of appState that still live in
         // localStorage. Call after any mutation to
-        // seasons/plans/pendingParentRequests/videos/focusSignals/countdownGoals.
+        // seasons/plans/pendingParentRequests/focusSignals/countdownGoals.
         function saveState() {
             try {
                 localStorage.setItem(STORAGE_KEYS.seasons, JSON.stringify(appState.seasons));
@@ -926,7 +935,6 @@
                 localStorage.setItem(STORAGE_KEYS.seasonHistory, JSON.stringify(appState.seasonHistory));
                 localStorage.setItem(STORAGE_KEYS.plans, JSON.stringify(appState.plans));
                 localStorage.setItem(STORAGE_KEYS.pendingParentRequests, JSON.stringify(appState.pendingParentRequests));
-                localStorage.setItem(STORAGE_KEYS.videos, JSON.stringify(appState.videos));
                 localStorage.setItem(STORAGE_KEYS.focusSignals, JSON.stringify(appState.focusSignals));
                 localStorage.setItem(STORAGE_KEYS.countdownGoals, JSON.stringify(appState.countdownGoals));
             } catch (error) {
@@ -955,8 +963,7 @@
                 const storedPendingRequests = localStorage.getItem(STORAGE_KEYS.pendingParentRequests);
                 if (storedPendingRequests) appState.pendingParentRequests = JSON.parse(storedPendingRequests);
 
-                const storedVideos = localStorage.getItem(STORAGE_KEYS.videos);
-                if (storedVideos) appState.videos = JSON.parse(storedVideos);
+                // videos now load from Supabase (loadVideosFromSupabase).
 
                 const storedFocusSignals = localStorage.getItem(STORAGE_KEYS.focusSignals);
                 // Each signal's embedded player is a snapshot after JSON
@@ -1202,6 +1209,117 @@
             if (error) throw error;
         }
 
+        function dbCommentToApp(row) {
+            return {
+                id: row.id,
+                user: row.author_name,
+                role: row.author_role,
+                timestamp: row.video_timestamp || '',
+                text: row.body,
+                date: row.created_at
+            };
+        }
+
+        function dbVideoToApp(row, comments) {
+            const player = appState.players.find(p => p.id === row.assigned_to_player_id);
+            return {
+                id: row.id,
+                name: row.name,
+                url: row.url,
+                uploadDate: row.upload_date,
+                uploadedBy: row.uploaded_by_name || 'Unknown',
+                description: row.description || '',
+                comments: comments,
+                assignedTo: row.assigned_to_team ? 'team' : (player ? player.number : null),
+                cloudflareUid: row.cloudflare_uid
+            };
+        }
+
+        // Loads videos and their comments from Supabase into appState,
+        // same mirror pattern as players: read sites across the app stay
+        // untouched, only this load function and the write call sites
+        // (confirmAddVideo, uploadVideoFile, postVideoComment, deleteVideo)
+        // change to go through Supabase instead of localStorage.
+        async function loadVideosFromSupabase() {
+            const { data: videoRows, error: videoError } = await supabaseClient
+                .from('videos')
+                .select('*')
+                .order('upload_date', { ascending: false });
+
+            if (videoError) {
+                console.error('Failed to load videos from Supabase:', videoError);
+                appState.videos = [];
+                return;
+            }
+
+            const { data: commentRows, error: commentError } = await supabaseClient
+                .from('video_comments')
+                .select('*')
+                .order('created_at');
+
+            if (commentError) {
+                console.error('Failed to load video comments from Supabase:', commentError);
+            }
+
+            appState.videos = (videoRows || []).map(row => {
+                const comments = (commentRows || [])
+                    .filter(c => c.video_id === row.id)
+                    .map(dbCommentToApp);
+                return dbVideoToApp(row, comments);
+            });
+        }
+
+        async function insertVideoToSupabase(video) {
+            const assignedToTeam = video.assignedTo === 'team';
+            const player = assignedToTeam ? null : appState.players.find(p => p.number === video.assignedTo);
+            if (!assignedToTeam && !player) throw new Error('Unknown player for this video');
+
+            const { data, error } = await supabaseClient
+                .from('videos')
+                .insert({
+                    name: video.name,
+                    url: video.url,
+                    description: video.description || null,
+                    assigned_to_team: assignedToTeam,
+                    assigned_to_player_id: assignedToTeam ? null : player.id,
+                    uploaded_by_name: video.uploadedBy,
+                    cloudflare_uid: video.cloudflareUid || null
+                })
+                .select()
+                .single();
+
+            if (error) throw error;
+            video.id = data.id;
+            video.uploadDate = data.upload_date;
+        }
+
+        async function deleteVideoFromSupabase(video) {
+            const { error } = await supabaseClient
+                .from('videos')
+                .delete()
+                .eq('id', video.id);
+
+            if (error) throw error;
+        }
+
+        async function insertVideoCommentToSupabase(videoId, comment) {
+            const { data, error } = await supabaseClient
+                .from('video_comments')
+                .insert({
+                    video_id: videoId,
+                    author_name: comment.user,
+                    author_role: comment.role,
+                    video_timestamp: comment.timestamp || null,
+                    body: comment.text
+                })
+                .select()
+                .single();
+
+            if (error) throw error;
+            comment.id = data.id;
+            comment.date = data.created_at;
+        }
+
         // Resolves a signed-in Supabase user into an app role (coach, or
         // parent/athlete linked to one player) and, once resolved, starts
         // the app exactly like the old password/access-code login() used to.
@@ -1278,11 +1396,13 @@
             appState.currentUser = 'Coach';
             await loadPlayersFromSupabase();
             await loadParentAccessFromSupabase();
+            await loadVideosFromSupabase();
             enterApp();
         }
 
         async function enterAsLinkedPlayer(user) {
             await loadPlayersFromSupabase();
+            await loadVideosFromSupabase();
 
             const { data: access } = await supabaseClient
                 .from('parent_access')
@@ -5240,6 +5360,11 @@ Example:
                     const match = u.pathname.match(/\/file\/d\/([^/]+)/);
                     if (match) return { type: 'iframe', src: `https://drive.google.com/file/d/${match[1]}/preview` };
                 }
+                // Videos uploaded through this app (see uploadVideoFile)
+                // already are the iframe URL - pass through as-is.
+                if (/\.cloudflarestream\.com$/.test(u.hostname)) {
+                    return { type: 'iframe', src: url };
+                }
             } catch (error) {
                 // Not a valid URL at all - treat as a dead link below
             }
@@ -5295,10 +5420,14 @@ Example:
                 <div class="player-card" style="margin-bottom: 20px;">
                     <h3 style="margin-bottom: 10px;">Share a Video</h3>
                     <p style="color: #7f8c8d; margin-bottom: 15px; font-size: 14px;">
-                        Paste a link from YouTube, Hudl, Vimeo, or Google Drive. Team videos are visible to every
-                        parent; a video assigned to a specific player is only visible to that player's parent.
+                        Paste a link from YouTube, Hudl, Vimeo, or Google Drive, or upload a clip straight from
+                        this device. Team videos are visible to every parent; a video assigned to a specific
+                        player is only visible to that player's parent.
                     </p>
-                    <button class="btn btn-success" onclick="openAddVideoModal()">➕ Add Video Link</button>
+                    <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+                        <button class="btn btn-success" onclick="openAddVideoModal()">➕ Add Video Link</button>
+                        <button class="btn btn-primary" onclick="openUploadVideoModal()">📤 Upload from Device</button>
+                    </div>
                 </div>
 
                 <div class="player-card" style="margin-bottom: 20px;">
@@ -5380,7 +5509,7 @@ Example:
             }
 
             grid.innerHTML = filteredVideos.map(video => `
-                <div class="video-card" onclick="openVideo('coach', ${video.id})" style="cursor: pointer;">
+                <div class="video-card" onclick="openVideo('coach', '${video.id}')" style="cursor: pointer;">
                     <div class="video-thumbnail">
                         <div style="display: flex; align-items: center; justify-content: center; height: 100%; color: white; font-size: 48px;">🎥</div>
                     </div>
@@ -5430,7 +5559,7 @@ Example:
             document.getElementById('messageModal').classList.add('active');
         }
 
-        window.confirmAddVideo = function() {
+        window.confirmAddVideo = async function() {
             const title = document.getElementById('videoTitle').value.trim();
             const url = document.getElementById('videoUrl').value.trim();
             const assignment = document.getElementById('videoAssignment').value;
@@ -5446,7 +5575,6 @@ Example:
             }
 
             const video = {
-                id: Date.now(),
                 name: title,
                 url: url,
                 uploadDate: new Date().toISOString(),
@@ -5456,21 +5584,151 @@ Example:
                 assignedTo: assignment === 'team' ? 'team' : parseInt(assignment)
             };
 
-            appState.videos.push(video);
-            saveState();
+            try {
+                await insertVideoToSupabase(video);
+            } catch (error) {
+                alert(`Could not add the video: ${error.message}`);
+                return;
+            }
+
+            appState.videos.unshift(video);
 
             closeModal('messageModal');
             updateVideoLibrary();
             openVideo('coach', video.id);
         }
 
-        window.deleteVideo = function(scope, videoId) {
+        // Shared upload modal for coach and parent/athlete alike.
+        // presetPlayerId: omit for the coach (shows a team/player picker);
+        // pass a player's Supabase id to skip the picker and scope the
+        // upload to that one player - used by the parent/athlete entry
+        // points, which should never offer a team-wide option.
+        window.openUploadVideoModal = function(presetPlayerId) {
+            const assignmentField = presetPlayerId ? '' : `
+                <div class="form-group">
+                    <label>Assign To</label>
+                    <select id="uploadVideoAssignment">
+                        <option value="team">👥 Team Video (every parent can see)</option>
+                        <optgroup label="Assign to Player">
+                            ${appState.players.map(p => `<option value="${p.id}">#${p.number} ${escapeHtml(p.first)} ${escapeHtml(p.last)}</option>`).join('')}
+                        </optgroup>
+                    </select>
+                </div>
+            `;
+
+            document.getElementById('messageModalContent').innerHTML = `
+                <h2 style="margin-bottom: 20px;">📤 Upload a Video</h2>
+
+                <div class="form-group">
+                    <label>Video Title</label>
+                    <input type="text" id="uploadVideoTitle" placeholder="e.g., Batting practice - 10/15">
+                </div>
+
+                <div class="form-group">
+                    <label>Video File</label>
+                    <input type="file" id="uploadVideoFile" accept="video/*">
+                    <p style="color: #7f8c8d; font-size: 12px; margin-top: 4px;">Recorded on your phone works fine - give it a moment to upload.</p>
+                </div>
+
+                ${assignmentField}
+
+                <div class="form-group">
+                    <label>Description (Optional)</label>
+                    <textarea id="uploadVideoDescription" placeholder="Add notes about this video..."></textarea>
+                </div>
+
+                <div id="uploadVideoStatus" style="color: #7f8c8d; font-size: 13px; margin-bottom: 10px;"></div>
+
+                <div style="display: flex; gap: 10px; margin-top: 10px;">
+                    <button class="btn btn-success" id="uploadVideoSubmitBtn" onclick="confirmUploadVideo('${presetPlayerId || ''}')">✓ Upload</button>
+                    <button class="btn btn-secondary" onclick="closeModal('messageModal')">Cancel</button>
+                </div>
+            `;
+            document.getElementById('messageModal').classList.add('active');
+        }
+
+        window.confirmUploadVideo = async function(presetPlayerId) {
+            const title = document.getElementById('uploadVideoTitle').value.trim();
+            const fileInput = document.getElementById('uploadVideoFile');
+            const file = fileInput.files[0];
+            const description = document.getElementById('uploadVideoDescription').value.trim();
+            const assignmentEl = document.getElementById('uploadVideoAssignment');
+            const assignmentValue = presetPlayerId || (assignmentEl ? assignmentEl.value : '');
+
+            if (!title || !file) {
+                alert('Please enter a title and choose a video file');
+                return;
+            }
+            if (!assignmentValue) {
+                alert('Please choose who this video is for');
+                return;
+            }
+
+            const statusEl = document.getElementById('uploadVideoStatus');
+            const submitBtn = document.getElementById('uploadVideoSubmitBtn');
+            submitBtn.disabled = true;
+
+            try {
+                statusEl.textContent = 'Starting upload...';
+                const { data: uploadInfo, error: startError } = await supabaseClient.functions.invoke('create-video-upload', {
+                    body: { scope: assignmentValue === 'team' ? 'team' : assignmentValue, maxDurationSeconds: 600 }
+                });
+                if (startError) throw new Error(startError.message || 'Could not start the upload');
+
+                statusEl.textContent = 'Uploading - this can take a bit on a slow connection...';
+                const formData = new FormData();
+                formData.append('file', file);
+                const uploadResp = await fetch(uploadInfo.uploadURL, { method: 'POST', body: formData });
+                if (!uploadResp.ok) {
+                    throw new Error(`Upload failed (${uploadResp.status})`);
+                }
+
+                statusEl.textContent = 'Saving...';
+                const assignedToTeam = assignmentValue === 'team';
+                const player = assignedToTeam ? null : appState.players.find(p => p.id === assignmentValue);
+
+                const video = {
+                    name: title,
+                    url: cloudflareIframeUrl(uploadInfo.uid),
+                    uploadDate: new Date().toISOString(),
+                    uploadedBy: appState.currentUser,
+                    description: description,
+                    comments: [],
+                    assignedTo: assignedToTeam ? 'team' : player.number,
+                    cloudflareUid: uploadInfo.uid
+                };
+                await insertVideoToSupabase(video);
+                appState.videos.unshift(video);
+
+                closeModal('messageModal');
+                if (appState.currentRole === 'coach') {
+                    updateVideoLibrary();
+                    openVideo('coach', video.id);
+                } else if (appState.currentRole === 'athlete') {
+                    renderAthleteVideos();
+                } else {
+                    renderParentVideos();
+                }
+            } catch (error) {
+                statusEl.textContent = '';
+                submitBtn.disabled = false;
+                alert(`Could not upload the video: ${error.message}`);
+            }
+        }
+
+        window.deleteVideo = async function(scope, videoId) {
             const video = appState.videos.find(v => v.id === videoId);
             if (!video) return;
             if (!confirm(`Remove "${video.name}"? This can't be undone.`)) return;
 
+            try {
+                await deleteVideoFromSupabase(video);
+            } catch (error) {
+                alert(`Could not delete the video: ${error.message}`);
+                return;
+            }
+
             appState.videos = appState.videos.filter(v => v.id !== videoId);
-            saveState();
             closeVideoPlayer(scope);
             updateVideoLibrary();
         }
@@ -5492,7 +5750,7 @@ Example:
             }
 
             const deleteButton = scope === 'coach'
-                ? `<button class="btn" style="background: #e74c3c; color: white; padding: 8px 16px;" onclick="deleteVideo('${scope}', ${video.id})">🗑️ Delete</button>`
+                ? `<button class="btn" style="background: #e74c3c; color: white; padding: 8px 16px;" onclick="deleteVideo('${scope}', '${video.id}')">🗑️ Delete</button>`
                 : '';
 
             section.innerHTML = `
@@ -5556,7 +5814,7 @@ Example:
                 const promoteButton = scope === 'coach'
                     ? (alreadyPromoted
                         ? `<span style="font-size: 11px; color: #7f8c8d;">✓ On focus queue</span>`
-                        : `<button class="btn btn-secondary" style="padding: 4px 10px; font-size: 11px;" onclick="promoteCommentToSignal(${comment.id})">🎯 Promote to Focus Signal</button>`)
+                        : `<button class="btn btn-secondary" style="padding: 4px 10px; font-size: 11px;" onclick="promoteCommentToSignal('${comment.id}')">🎯 Promote to Focus Signal</button>`)
                     : '';
                 return `
                     <div class="comment-item">
@@ -5572,7 +5830,7 @@ Example:
             }).join('');
         }
 
-        window.postVideoComment = function(scope) {
+        window.postVideoComment = async function(scope) {
             const video = appState.currentVideo;
             if (!video) return;
 
@@ -5584,15 +5842,22 @@ Example:
                 return;
             }
 
-            video.comments.push({
-                id: Date.now(),
+            const comment = {
                 user: appState.currentUser,
                 role: appState.currentRole,
                 timestamp: timestampEl.value.trim(),
                 text: text,
                 date: new Date().toISOString()
-            });
-            saveState();
+            };
+
+            try {
+                await insertVideoCommentToSupabase(video.id, comment);
+            } catch (error) {
+                alert(`Could not post the comment: ${error.message}`);
+                return;
+            }
+
+            video.comments.push(comment);
 
             textEl.value = '';
             timestampEl.value = '';
@@ -5609,6 +5874,9 @@ Example:
             const container = document.getElementById('parentVideoContent');
             container.innerHTML = `
                 <h2 style="margin-bottom: 20px;">🎥 Videos</h2>
+                <div class="player-card" style="margin-bottom: 20px;">
+                    <button class="btn btn-primary" onclick="openUploadVideoModal('${player.id}')">📤 Upload a video of ${escapeHtml(player.first)}</button>
+                </div>
                 <div id="parentVideoPlayerSection" style="display: none; margin-bottom: 20px;"></div>
                 <div class="video-library" id="parentVideoLibraryGrid"></div>
             `;
@@ -5625,7 +5893,7 @@ Example:
             }
 
             grid.innerHTML = videos.map(video => `
-                <div class="video-card" onclick="openVideo('parent', ${video.id})" style="cursor: pointer;">
+                <div class="video-card" onclick="openVideo('parent', '${video.id}')" style="cursor: pointer;">
                     <div class="video-thumbnail">
                         <div style="display: flex; align-items: center; justify-content: center; height: 100%; color: white; font-size: 48px;">🎥</div>
                     </div>
@@ -5645,6 +5913,9 @@ Example:
             const container = document.getElementById('athleteVideoContent');
             container.innerHTML = `
                 <h2 style="margin-bottom: 20px;">🎥 Videos</h2>
+                <div class="player-card" style="margin-bottom: 20px;">
+                    <button class="btn btn-primary" onclick="openUploadVideoModal('${player.id}')">📤 Upload a Video</button>
+                </div>
                 <div id="athleteVideoPlayerSection" style="display: none; margin-bottom: 20px;"></div>
                 <div class="video-library" id="athleteVideoLibraryGrid"></div>
             `;
@@ -5661,7 +5932,7 @@ Example:
             }
 
             grid.innerHTML = videos.map(video => `
-                <div class="video-card" onclick="openVideo('athlete', ${video.id})" style="cursor: pointer;">
+                <div class="video-card" onclick="openVideo('athlete', '${video.id}')" style="cursor: pointer;">
                     <div class="video-thumbnail">
                         <div style="display: flex; align-items: center; justify-content: center; height: 100%; color: white; font-size: 48px;">🎥</div>
                     </div>
@@ -5972,7 +6243,7 @@ Example:
                         pendingParentRequests: localStorage.getItem('pendingParentRequests'),
                         developmentPlans: localStorage.getItem('developmentPlans'),
                         seasonHistory: localStorage.getItem('seasonHistory'),
-                        videos: localStorage.getItem('videos'),
+                        videos: JSON.stringify(appState.videos),
                         focusSignals: localStorage.getItem('focusSignals'),
                         countdownGoals: localStorage.getItem('countdownGoals')
                     }
@@ -6018,8 +6289,8 @@ Example:
             // Confirm before importing (will overwrite current data)
             const confirmed = confirm(
                 '⚠️ WARNING: Importing will REPLACE all current data.\n\n' +
-                'Note: the player roster and parent access now live on the server ' +
-                'and are NOT affected by this - only videos, focus signals, countdowns, ' +
+                'Note: the player roster, parent access, and videos now live on the server ' +
+                'and are NOT affected by this - only focus signals, countdowns, ' +
                 'plans, and season history are restored from this file.\n\n' +
                 'Make sure you have exported a backup of your current data first!\n\n' +
                 'Continue with import?'
@@ -6043,13 +6314,13 @@ Example:
                         throw new Error('Invalid backup file format');
                     }
                     
-                    // Restore all data except players/parentAccess, which
-                    // live in Supabase now - writing them to localStorage
-                    // would do nothing (loadState() no longer reads them
-                    // from there) and risks looking like a silent restore
-                    // that didn't actually happen.
+                    // Restore all data except players/parentAccess/videos,
+                    // which live in Supabase now - writing them to
+                    // localStorage would do nothing (loadState() no longer
+                    // reads them from there) and risks looking like a
+                    // silent restore that didn't actually happen.
                     Object.keys(backupData.data).forEach(key => {
-                        if (key === 'players' || key === 'parentAccess') return;
+                        if (key === 'players' || key === 'parentAccess' || key === 'videos') return;
                         if (backupData.data[key] !== null) {
                             localStorage.setItem(key, backupData.data[key]);
                         }

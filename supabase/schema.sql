@@ -87,7 +87,14 @@ create table videos (
   assigned_to_player_id uuid references players(id) on delete cascade,
   assigned_to_team boolean not null default false,
   uploaded_by uuid references profiles(id),
+  -- Free-text label shown as "Shared by ___" (e.g. "Jake's Parent") - not
+  -- reconstructible from profiles alone, since that framing is derived at
+  -- sign-in from the linked player, not a fixed identity property.
+  uploaded_by_name text,
   upload_date timestamptz not null default now(),
+  -- Set once Cloudflare finishes encoding a directly-uploaded video;
+  -- null for link-based videos (YouTube/Hudl/Drive/etc, always "ready").
+  cloudflare_uid text,
   constraint videos_assignment_check check (
     (assigned_to_team = true and assigned_to_player_id is null)
     or (assigned_to_team = false and assigned_to_player_id is not null)
@@ -98,6 +105,9 @@ create table video_comments (
   id uuid primary key default gen_random_uuid(),
   video_id uuid not null references videos(id) on delete cascade,
   author_id uuid references profiles(id),
+  author_name text,
+  author_role text, -- 'coach' | 'parent' | 'athlete' - display only, not an access check
+  video_timestamp text, -- the optional "at 1:23" note, not a DB row timestamp
   body text not null,
   promoted boolean not null default false,
   created_at timestamptz not null default now()
@@ -278,6 +288,16 @@ create policy "Parents view relevant videos"
   using (
     assigned_to_team = true
     or assigned_to_player_id in (select linked_player_ids())
+  );
+
+-- Linked parents/athletes can upload a video for their own player, but
+-- never team-wide (that stays coach-only, same as the app's UI only
+-- offering team assignment to the coach).
+create policy "Parents upload videos for their linked player"
+  on videos for insert
+  with check (
+    assigned_to_team = false
+    and assigned_to_player_id in (select linked_player_ids())
   );
 
 -- video_comments: coaches manage everything; linked parents/athletes
