@@ -5678,8 +5678,25 @@ Example:
                 const formData = new FormData();
                 formData.append('file', file);
                 const uploadResp = await fetch(uploadInfo.uploadURL, { method: 'POST', body: formData });
+
+                // Cloudflare's basic-upload endpoint has been observed
+                // returning a non-2xx (confirmed: a 500 with an empty
+                // body) even when the file was received and encoded
+                // successfully - so a bad status here isn't proof the
+                // upload actually failed. Ask Cloudflare directly (via
+                // the Edge Function, which holds the API token) whether
+                // the video really exists before giving up on it.
                 if (!uploadResp.ok) {
-                    throw new Error(`Upload failed (${uploadResp.status})`);
+                    statusEl.textContent = 'Upload reported an error - double-checking with Cloudflare...';
+                    const { data: checkResult, error: checkError } = await supabaseClient.functions.invoke('create-video-upload', {
+                        body: { checkUid: uploadInfo.uid }
+                    });
+                    if (checkError || !checkResult || !checkResult.exists) {
+                        throw new Error(`Upload failed (${uploadResp.status})`);
+                    }
+                    // Cloudflare confirms it actually has the video - the
+                    // upload succeeded despite the bad response, so fall
+                    // through and save it normally.
                 }
 
                 statusEl.textContent = 'Saving...';
