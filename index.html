@@ -5646,6 +5646,33 @@ Example:
             document.getElementById('messageModal').classList.add('active');
         }
 
+        // Plain fetch() can reject outright on a flaky mobile connection
+        // (observed: Safari's "Load failed") rather than resolving with a
+        // bad status - and a thrown error isn't proof the file never made
+        // it to Cloudflare either. Using XHR here (instead of fetch) also
+        // gives real upload progress, which matters on a slow phone
+        // connection where a multi-minute upload with no feedback looks
+        // like it's stuck.
+        function uploadFileToCloudflare(url, file, onProgress) {
+            return new Promise((resolve, reject) => {
+                const formData = new FormData();
+                formData.append('file', file);
+                const xhr = new XMLHttpRequest();
+                xhr.open('POST', url);
+                xhr.timeout = 10 * 60 * 1000;
+                xhr.upload.onprogress = (e) => {
+                    if (e.lengthComputable && onProgress) onProgress(Math.round((e.loaded / e.total) * 100));
+                };
+                xhr.onload = () => {
+                    if (xhr.status >= 200 && xhr.status < 300) resolve();
+                    else reject(new Error(`Upload failed (${xhr.status})`));
+                };
+                xhr.onerror = () => reject(new Error('Load failed'));
+                xhr.ontimeout = () => reject(new Error('Upload timed out'));
+                xhr.send(formData);
+            });
+        }
+
         window.confirmUploadVideo = async function(presetPlayerId) {
             const title = document.getElementById('uploadVideoTitle').value.trim();
             const fileInput = document.getElementById('uploadVideoFile');
@@ -5674,29 +5701,36 @@ Example:
                 });
                 if (startError) throw new Error(startError.message || 'Could not start the upload');
 
-                statusEl.textContent = 'Uploading - this can take a bit on a slow connection...';
-                const formData = new FormData();
-                formData.append('file', file);
-                const uploadResp = await fetch(uploadInfo.uploadURL, { method: 'POST', body: formData });
+                statusEl.textContent = 'Uploading... 0%';
+                let uploadFailure = null;
+                try {
+                    await uploadFileToCloudflare(uploadInfo.uploadURL, file, (percent) => {
+                        statusEl.textContent = `Uploading... ${percent}%`;
+                    });
+                } catch (err) {
+                    uploadFailure = err;
+                }
 
                 // Cloudflare's basic-upload endpoint has been observed
-                // returning a non-2xx (confirmed: a 500 with an empty
-                // body) even when the file was received and encoded
-                // successfully - so a bad status here isn't proof the
-                // upload actually failed. Ask Cloudflare directly (via
-                // the Edge Function, which holds the API token) whether
-                // the video really exists before giving up on it.
-                if (!uploadResp.ok) {
+                // both returning a non-2xx (confirmed: a 500 with an
+                // empty body) and having the request itself error out on
+                // a flaky mobile connection (confirmed: Safari's "Load
+                // failed") even when the file was actually received and
+                // encoded successfully - so neither is proof the upload
+                // actually failed. Ask Cloudflare directly (via the Edge
+                // Function, which holds the API token) whether the video
+                // really exists before giving up on it.
+                if (uploadFailure) {
                     statusEl.textContent = 'Upload reported an error - double-checking with Cloudflare...';
                     const { data: checkResult, error: checkError } = await supabaseClient.functions.invoke('create-video-upload', {
                         body: { checkUid: uploadInfo.uid }
                     });
                     if (checkError || !checkResult || !checkResult.exists) {
-                        throw new Error(`Upload failed (${uploadResp.status})`);
+                        throw uploadFailure;
                     }
                     // Cloudflare confirms it actually has the video - the
-                    // upload succeeded despite the bad response, so fall
-                    // through and save it normally.
+                    // upload succeeded despite the error, so fall through
+                    // and save it normally.
                 }
 
                 statusEl.textContent = 'Saving...';
