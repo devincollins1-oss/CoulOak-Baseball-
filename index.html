@@ -5836,6 +5836,13 @@ Example:
                 appState.videos.unshift(video);
 
                 closeModal('messageModal');
+                // The file has finished uploading at this point, but
+                // Cloudflare still needs to encode it before it's actually
+                // watchable - that typically takes roughly as long as the
+                // upload itself, sometimes longer. Say so up front instead
+                // of leaving it looking broken/stuck if someone opens it
+                // right away.
+                alert("Video uploaded! Cloudflare is still processing it, which usually takes about as long as the upload did - if it looks stuck or won't play yet, give it a minute and reopen it (or refresh the page).");
                 if (appState.currentRole === 'coach') {
                     updateVideoLibrary();
                     openVideo('coach', video.id);
