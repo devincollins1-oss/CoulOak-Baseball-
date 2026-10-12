@@ -3,14 +3,14 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Couloak Diesel Development OS</title>
+    <title>Brain Fitness Coach Development OS</title>
     <link rel="manifest" href="manifest.json">
     <link rel="icon" href="icons/favicon-32.png">
     <link rel="apple-touch-icon" href="icons/icon-192.png">
     <meta name="theme-color" content="#2c3e50">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-    <meta name="apple-mobile-web-app-title" content="Couloak">
+    <meta name="apple-mobile-web-app-title" content="Brain Fitness Coach">
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3/dist/umd/supabase.js"></script>
     <style>
         * {
@@ -631,7 +631,7 @@
     <!-- Login Screen -->
     <div class="login-container" id="loginScreen">
         <div class="login-box">
-            <h1>⚾ Couloak Diesel 11U</h1>
+            <h1>⚾ Brain Fitness Coach</h1>
             <p style="text-align: center; color: #7f8c8d; margin-bottom: 30px;">Development Operating System</p>
 
             <!-- Checking for an existing session / completing a magic-link sign-in -->
@@ -695,7 +695,7 @@
     <div class="app-container" id="appContainer">
         <div class="app-header">
             <div>
-                <h1>⚾ Couloak Diesel 11U Development OS</h1>
+                <h1>⚾ Brain Fitness Coach Development OS</h1>
                 <p id="seasonInfo">Fall 2025 Season</p>
             </div>
             <div class="user-info">
@@ -6668,7 +6668,7 @@ Example:
                 const backupData = {
                     version: '1.0',
                     exportDate: new Date().toISOString(),
-                    appName: 'Couloak Diesel Development OS',
+                    appName: 'Brain Fitness Coach Development OS',
                     data: {
                         players: JSON.stringify(appState.players),
                         seasons: localStorage.getItem('seasons'),
@@ -6694,7 +6694,7 @@ Example:
                 
                 // Generate filename with date
                 const date = new Date().toISOString().split('T')[0];
-                a.download = `couloak-diesel-backup-${date}.json`;
+                a.download = `brain-fitness-coach-backup-${date}.json`;
                 
                 // Trigger download
                 document.body.appendChild(a);
@@ -6783,8 +6783,8 @@ Example:
         }
 
         function downloadBackupGuide() {
-            const guide = `COULOAK DIESEL BACKUP GUIDE
-============================
+            const guide = `BRAIN FITNESS COACH BACKUP GUIDE
+=================================
 
 WHY BACKUP?
 -----------
@@ -6794,7 +6794,7 @@ different device, the data will be lost. Regular backups protect against data lo
 HOW TO BACKUP:
 --------------
 1. Click "Export Backup" button (in Coach View → scroll down)
-2. File downloads: couloak-diesel-backup-YYYY-MM-DD.json
+2. File downloads: brain-fitness-coach-backup-YYYY-MM-DD.json
 3. Store the file safely:
    ✅ Email it to yourself
    ✅ Save to Google Drive
@@ -6818,7 +6818,7 @@ HOW TO RESTORE:
 TIPS:
 -----
 • Keep multiple backups (don't delete old ones)
-• Name backups clearly: couloak-diesel-backup-2025-03-15.json
+• Name backups clearly: brain-fitness-coach-backup-2025-03-15.json
 • Test restoring a backup once to make sure you know how
 • Share backup with another coach as extra protection
 
@@ -6839,7 +6839,7 @@ Questions? Contact your head coach.
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.href = url;
-            a.download = 'couloak-diesel-backup-guide.txt';
+            a.download = 'brain-fitness-coach-backup-guide.txt';
             document.body.appendChild(a);
             a.click();
             document.body.removeChild(a);
