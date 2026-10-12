@@ -19,11 +19,15 @@
 
 -- One row per signed-in user, created by the app right after
 -- Supabase Auth creates the account (see app-side auth code).
+-- 'admin' is the one-time bootstrap role (see any_admin_profile_exists()
+-- below) and has every 'coach' permission plus the ability to invite
+-- other coaches - everywhere else in this schema, is_coach() returns
+-- true for admins too, so no policy needs to name 'admin' directly.
 create table profiles (
   id uuid primary key references auth.users(id) on delete cascade,
   email text not null,
   full_name text,
-  role text not null default 'parent' check (role in ('coach', 'parent')),
+  role text not null default 'parent' check (role in ('coach', 'parent', 'admin')),
   created_at timestamptz not null default now()
 );
 
@@ -58,6 +62,17 @@ create table parent_access (
   status text not null default 'pending' check (status in ('pending', 'approved', 'denied')),
   requested_at timestamptz not null default now(),
   approved_at timestamptz
+);
+
+-- Admin-managed invite/approval list for the coach role, same shape and
+-- same "approved the moment the row exists" pattern as parent_access.
+create table coach_invites (
+  id uuid primary key default gen_random_uuid(),
+  email text not null,
+  full_name text,
+  status text not null default 'approved' check (status in ('pending', 'approved', 'revoked')),
+  invited_by uuid references profiles(id),
+  invited_at timestamptz not null default now()
 );
 
 create table focus_signals (
@@ -156,6 +171,9 @@ create table messages (
 -- itself - the standard Supabase pattern for this)
 -- ------------------------------------------------------------
 
+-- True for both 'coach' and 'admin' - admins get every coach permission
+-- everywhere this is used, rather than every policy below needing to
+-- name both roles.
 create or replace function is_coach()
 returns boolean
 language sql
@@ -164,7 +182,37 @@ set search_path = public
 stable
 as $$
   select exists (
-    select 1 from profiles where id = auth.uid() and role = 'coach'
+    select 1 from profiles where id = auth.uid() and role in ('coach', 'admin')
+  );
+$$;
+
+-- True only for 'admin' - used just for the one admin-only permission
+-- (managing coach_invites) that a regular coach doesn't get.
+create or replace function is_admin()
+returns boolean
+language sql
+security definer
+set search_path = public
+stable
+as $$
+  select exists (
+    select 1 from profiles where id = auth.uid() and role = 'admin'
+  );
+$$;
+
+-- Has an admin invited the signed-in user's verified email as a coach?
+-- Matched on auth email, same as linked_player_ids() - never something
+-- the client can fake.
+create or replace function has_approved_coach_invite()
+returns boolean
+language sql
+security definer
+set search_path = public
+stable
+as $$
+  select exists (
+    select 1 from coach_invites
+    where status = 'approved' and lower(email) = lower(auth.jwt() ->> 'email')
   );
 $$;
 
@@ -182,26 +230,31 @@ as $$
     and lower(parent_email) = lower(auth.jwt() ->> 'email');
 $$;
 
--- Used only to gate the one-time "claim the coach role" bootstrap
--- insert below - true once any coach profile exists, permanently
--- closing that path for everyone after the first one.
-create or replace function any_coach_profile_exists()
+-- Used only to gate the one-time "claim the admin role" bootstrap
+-- insert below - true once any admin profile exists, permanently
+-- closing that path for everyone after the first one. Everyone after
+-- that first admin gets in as a coach via coach_invites, or as a
+-- parent/athlete via parent_access - never by self-service claim.
+create or replace function any_admin_profile_exists()
 returns boolean
 language sql
 security definer
 set search_path = public
 stable
 as $$
-  select exists (select 1 from profiles where role = 'coach');
+  select exists (select 1 from profiles where role = 'admin');
 $$;
 
--- Explicit rather than relying on default privileges: is_coach() and
--- linked_player_ids() are invoked implicitly from inside RLS policies,
--- and any_coach_profile_exists() is also called directly from the app
--- (via PostgREST's /rpc/ endpoint) during the sign-in bootstrap check.
+-- Explicit rather than relying on default privileges: is_coach(),
+-- is_admin(), has_approved_coach_invite() and linked_player_ids() are
+-- invoked implicitly from inside RLS policies, and
+-- any_admin_profile_exists() is also called directly from the app (via
+-- PostgREST's /rpc/ endpoint) during the sign-in bootstrap check.
 grant execute on function is_coach() to authenticated;
+grant execute on function is_admin() to authenticated;
+grant execute on function has_approved_coach_invite() to authenticated;
 grant execute on function linked_player_ids() to authenticated;
-grant execute on function any_coach_profile_exists() to authenticated;
+grant execute on function any_admin_profile_exists() to authenticated;
 
 -- ------------------------------------------------------------
 -- Row Level Security
@@ -210,6 +263,7 @@ grant execute on function any_coach_profile_exists() to authenticated;
 alter table profiles enable row level security;
 alter table players enable row level security;
 alter table parent_access enable row level security;
+alter table coach_invites enable row level security;
 alter table focus_signals enable row level security;
 alter table videos enable row level security;
 alter table video_comments enable row level security;
@@ -222,20 +276,37 @@ create policy "Users read their own profile"
   on profiles for select
   using (id = auth.uid() or is_coach());
 
--- A user may only ever insert their own row, and may only claim the
--- 'coach' role while no coach exists yet (the one-time setup step -
--- see any_coach_profile_exists() above). Every sign-in after that
--- first one can only create a 'parent' profile.
+-- A user may only ever insert their own row, and:
+--   - 'admin' only while no admin exists yet (the one-time bootstrap -
+--     see any_admin_profile_exists() above)
+--   - 'coach' only with an approved coach_invites row for their email
+--   - 'parent' always (parent_access decides what they can actually see)
 create policy "Users create their own profile"
   on profiles for insert
   with check (
     id = auth.uid()
-    and (role = 'parent' or (role = 'coach' and not any_coach_profile_exists()))
+    and (
+      role = 'parent'
+      or (role = 'admin' and not any_admin_profile_exists())
+      or (role = 'coach' and has_approved_coach_invite())
+    )
   );
 
 create policy "Coaches manage all profiles"
   on profiles for update
   using (is_coach());
+
+-- coach_invites: admin-only, same shape as "Coaches manage parent
+-- access" below but restricted to is_admin() rather than is_coach() -
+-- a regular coach can invite parents but not other coaches.
+create policy "Admins manage coach invites"
+  on coach_invites for all
+  using (is_admin())
+  with check (is_admin());
+
+create policy "Invited users view their own coach invite"
+  on coach_invites for select
+  using (lower(email) = lower(auth.jwt() ->> 'email'));
 
 -- players: coaches manage; linked parents/athletes read their own kid
 create policy "Coaches manage players"

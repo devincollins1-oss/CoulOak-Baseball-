@@ -665,15 +665,15 @@
                 <button class="btn btn-secondary" style="margin-top: 15px;" onclick="showAuthStep('authEmailStep')">Use a different email</button>
             </div>
 
-            <!-- Signed in, no coach exists yet on this project: one-time claim -->
-            <div id="authBootstrapCoachStep" style="display: none;">
+            <!-- Signed in, no admin exists yet on this project: one-time claim -->
+            <div id="authBootstrapAdminStep" style="display: none;">
                 <p style="color: #2c3e50; margin-bottom: 15px;">
-                    No coach account exists yet for this team. Is that you?
+                    No admin account exists yet for this team. Is that you?
                 </p>
-                <button class="btn btn-primary" onclick="claimCoachRole()">Yes, set me up as the coach</button>
+                <button class="btn btn-primary" onclick="claimAdminRole()">Yes, set me up as the admin</button>
             </div>
 
-            <!-- Signed in, no parent_access row for this email yet -->
+            <!-- Signed in, no parent_access or coach_invites row for this email yet -->
             <div id="authNoAccessStep" style="display: none;">
                 <p style="text-align: center; color: #2c3e50;">
                     Your coach hasn't granted this email access yet. Ask them to add you under Team Management.
@@ -867,6 +867,7 @@
         const appState = {
             currentUser: null,
             currentRole: null,
+            isAdmin: false, // true for the admin role, which otherwise has every coach permission (see enterAsCoach)
             currentPlayer: null,
             pendingSignalSource: null,
             players: [],
@@ -1017,7 +1018,7 @@
         // supabase/schema.sql, never something this client decides on its own.
 
         function showAuthStep(stepId) {
-            ['authLoadingStep', 'authEmailStep', 'authCheckEmailStep', 'authBootstrapCoachStep', 'authNoAccessStep', 'authPendingStep']
+            ['authLoadingStep', 'authEmailStep', 'authCheckEmailStep', 'authBootstrapAdminStep', 'authNoAccessStep', 'authPendingStep']
                 .forEach(id => {
                     const el = document.getElementById(id);
                     if (el) el.style.display = id === stepId ? 'block' : 'none';
@@ -1073,19 +1074,21 @@
         }
 
         // One-time bootstrap: the very first person to sign in and claim
-        // this button becomes the coach. RLS (any_coach_profile_exists() in
+        // this button becomes the admin. RLS (any_admin_profile_exists() in
         // supabase/schema.sql) permanently closes this off the moment one
-        // coach profile exists, so it can't be used to self-promote later.
-        window.claimCoachRole = async function() {
+        // admin profile exists, so it can't be used to self-promote later.
+        // Everyone else only ever gets in as a coach via an admin's
+        // invite (coach_invites) or as a parent/athlete via parent_access.
+        window.claimAdminRole = async function() {
             const { data: { user } } = await supabaseClient.auth.getUser();
             if (!user) return;
 
             const { error } = await supabaseClient
                 .from('profiles')
-                .insert({ id: user.id, email: user.email, role: 'coach' });
+                .insert({ id: user.id, email: user.email, role: 'admin' });
 
             if (error) {
-                alert('Could not set up the coach account - someone may have just claimed it. Reloading.');
+                alert('Could not set up the admin account - someone may have just claimed it. Reloading.');
                 location.reload();
                 return;
             }
@@ -1284,6 +1287,21 @@
             if (error) throw error;
         }
 
+        // Admin-only, same pre-approved pattern as parent_access: the coach
+        // role is granted the moment this row exists with status
+        // 'approved', not when the invited person first signs in.
+        async function insertCoachInviteToSupabase(name, email) {
+            const { error } = await supabaseClient
+                .from('coach_invites')
+                .insert({
+                    full_name: name,
+                    email: email,
+                    status: 'approved'
+                });
+
+            if (error) throw error;
+        }
+
         async function deleteParentAccessFromSupabase(supabaseId) {
             const { error } = await supabaseClient
                 .from('parent_access')
@@ -1422,8 +1440,8 @@
             }
 
             if (profile) {
-                if (profile.role === 'coach') {
-                    await enterAsCoach();
+                if (profile.role === 'coach' || profile.role === 'admin') {
+                    await enterAsCoach(profile.role);
                 } else {
                     await enterAsLinkedPlayer(user);
                 }
@@ -1431,7 +1449,7 @@
             }
 
             // No profile yet - first time this email has ever signed in.
-            // Has the coach already granted this email access to a player?
+            // Has the coach/admin already granted this email access to a player?
             const { data: access, error: accessError } = await supabaseClient
                 .from('parent_access')
                 .select('status')
@@ -1460,24 +1478,50 @@
                 return;
             }
 
-            const { data: coachExists, error: coachCheckError } = await supabaseClient.rpc('any_coach_profile_exists');
-            if (coachCheckError) {
-                // Fail closed: if we can't actually confirm whether a coach
-                // exists, never show the self-service "set me up as coach"
-                // button on a guess - that's the one screen a real security
-                // mistake here could matter on. Bounce back to email entry
-                // and let them retry.
-                console.error('Could not check coach status:', coachCheckError);
+            // Has an admin invited this email as a coach?
+            const { data: coachInvite, error: coachInviteError } = await supabaseClient
+                .from('coach_invites')
+                .select('status')
+                .ilike('email', user.email);
+
+            if (coachInviteError) {
+                console.error('Could not check coach invite status:', coachInviteError);
                 alert('Could not verify your account status - please try again in a moment.');
                 showAuthStep('authEmailStep');
                 return;
             }
-            showAuthStep(coachExists ? 'authNoAccessStep' : 'authBootstrapCoachStep');
+
+            if (coachInvite && coachInvite.some(c => c.status === 'approved')) {
+                const { error } = await supabaseClient
+                    .from('profiles')
+                    .insert({ id: user.id, email: user.email, role: 'coach' });
+                if (error) {
+                    alert(`Could not finish setting up your account: ${error.message}`);
+                    return;
+                }
+                await enterAsCoach('coach');
+                return;
+            }
+
+            const { data: adminExists, error: adminCheckError } = await supabaseClient.rpc('any_admin_profile_exists');
+            if (adminCheckError) {
+                // Fail closed: if we can't actually confirm whether an admin
+                // exists, never show the self-service "set me up as admin"
+                // button on a guess - that's the one screen a real security
+                // mistake here could matter on. Bounce back to email entry
+                // and let them retry.
+                console.error('Could not check admin status:', adminCheckError);
+                alert('Could not verify your account status - please try again in a moment.');
+                showAuthStep('authEmailStep');
+                return;
+            }
+            showAuthStep(adminExists ? 'authNoAccessStep' : 'authBootstrapAdminStep');
         }
 
-        async function enterAsCoach() {
+        async function enterAsCoach(role) {
             appState.currentRole = 'coach';
-            appState.currentUser = 'Coach';
+            appState.isAdmin = role === 'admin';
+            appState.currentUser = appState.isAdmin ? 'Admin' : 'Coach';
             await loadPlayersFromSupabase();
             await loadParentAccessFromSupabase();
             await loadVideosFromSupabase();
@@ -4387,7 +4431,7 @@ Example:
                     </div>
                 </div>
 
-                <div style="display: grid; grid-template-columns: 1fr; gap: 20px; margin-bottom: 30px;">
+                <div style="display: grid; grid-template-columns: ${appState.isAdmin ? '1fr 1fr' : '1fr'}; gap: 20px; margin-bottom: 30px;">
                     <!-- Parent Access Summary -->
                     <div class="player-card">
                         <h3 style="margin-bottom: 15px;">👪 Parent Access</h3>
@@ -4398,6 +4442,19 @@ Example:
                             📧 Invite Parent
                         </button>
                     </div>
+
+                    ${appState.isAdmin ? `
+                    <!-- Coach Access (admin only) -->
+                    <div class="player-card">
+                        <h3 style="margin-bottom: 15px;">🧑‍🏫 Coach Access</h3>
+                        <p style="color: #7f8c8d; margin-bottom: 15px; font-size: 14px;">
+                            Give another coach their own sign-in - they'll get the same access you do, except inviting other coaches.
+                        </p>
+                        <button class="btn btn-primary" onclick="openInviteCoachModal()" style="width: 100%;">
+                            📧 Invite Coach
+                        </button>
+                    </div>
+                    ` : ''}
                 </div>
 
                 <!-- Data Backup & Restore -->
@@ -4887,6 +4944,59 @@ Example:
             renderTeamManagement();
             closeModal('messageModal');
             alert(`Access granted! ${name} can now sign in with ${email} to see ${player.first} ${player.last}'s data.`);
+        }
+
+        // Admin only - the "Invite Coach" button is hidden otherwise, and
+        // the coach_invites table itself is admin-only in RLS either way.
+        window.openInviteCoachModal = function() {
+            document.getElementById('messageModalContent').innerHTML = `
+                <h2 style="margin-bottom: 20px;">📧 Invite a Coach</h2>
+
+                <div class="form-group">
+                    <label>Name *</label>
+                    <input type="text" id="inviteCoachName" placeholder="e.g., Jamie Rivera" required>
+                </div>
+
+                <div class="form-group">
+                    <label>Email *</label>
+                    <input type="email" id="inviteCoachEmail" placeholder="e.g., jamie.rivera@email.com" required>
+                    <p style="color: #7f8c8d; font-size: 12px; margin-top: 4px;">They'll sign in with this exact email via a link we send them - no password to set up.</p>
+                </div>
+
+                <div style="background: #e8f5e9; padding: 15px; border-radius: 6px; margin-bottom: 20px;">
+                    <p style="margin: 0; font-size: 13px; color: #2c3e50;">
+                        <strong>✓ Pre-Approved:</strong> This person will get full coach access - roster, stats,
+                        videos, messages - as soon as they sign in with this email. They won't be able to invite
+                        other coaches themselves; only an admin can do that.
+                    </p>
+                </div>
+
+                <div style="display: flex; gap: 10px; margin-top: 20px;">
+                    <button class="btn btn-success" onclick="sendCoachInvite()">✓ Grant Coach Access</button>
+                    <button class="btn btn-secondary" onclick="closeModal('messageModal')">Cancel</button>
+                </div>
+            `;
+            document.getElementById('messageModal').classList.add('active');
+        }
+
+        window.sendCoachInvite = async function() {
+            const name = document.getElementById('inviteCoachName').value.trim();
+            const email = document.getElementById('inviteCoachEmail').value.trim().toLowerCase();
+
+            if (!name || !email) {
+                alert('Please fill in all required fields');
+                return;
+            }
+
+            try {
+                await insertCoachInviteToSupabase(name, email);
+            } catch (error) {
+                alert(`Could not grant coach access: ${error.message}`);
+                return;
+            }
+
+            closeModal('messageModal');
+            alert(`Coach access granted! ${name} can now sign in with ${email}.`);
         }
 
         // Approve Parent Request
