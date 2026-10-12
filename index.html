@@ -868,6 +868,7 @@
             currentUser: null,
             currentRole: null,
             isAdmin: false, // true for the admin role, which otherwise has every coach permission (see enterAsCoach)
+            coaches: [], // { id, email, fullName, role } - admin-only, loaded via loadCoachesFromSupabase()
             currentPlayer: null,
             pendingSignalSource: null,
             players: [],
@@ -1525,7 +1526,32 @@
             await loadPlayersFromSupabase();
             await loadParentAccessFromSupabase();
             await loadVideosFromSupabase();
+            if (appState.isAdmin) await loadCoachesFromSupabase();
             enterApp();
+        }
+
+        // Admin-only - a regular coach can't see or remove other coaches,
+        // so there's no reason to load this list for them.
+        async function loadCoachesFromSupabase() {
+            const { data, error } = await supabaseClient
+                .from('profiles')
+                .select('id, email, full_name, role')
+                .in('role', ['coach', 'admin'])
+                .order('role')
+                .order('email');
+
+            if (error) {
+                console.error('Failed to load coaches from Supabase:', error);
+                appState.coaches = [];
+                return;
+            }
+
+            appState.coaches = (data || []).map(row => ({
+                id: row.id,
+                email: row.email,
+                fullName: row.full_name,
+                role: row.role
+            }));
         }
 
         async function enterAsLinkedPlayer(user) {
@@ -4591,6 +4617,43 @@ Example:
                     </div>
                 </div>
                 ` : ''}
+
+                <!-- Coaches & Admins (admin only) -->
+                ${appState.isAdmin && appState.coaches.length > 0 ? `
+                <div class="player-card" style="margin-top: 20px;">
+                    <h3 style="margin-bottom: 15px;">🧑‍🏫 Coaches &amp; Admins</h3>
+                    <div style="overflow-x: auto;">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Name</th>
+                                    <th>Email</th>
+                                    <th>Role</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                ${appState.coaches.map(person => `
+                                    <tr>
+                                        <td>${escapeHtml(person.fullName || '')}</td>
+                                        <td style="color: #7f8c8d; font-size: 13px;">${escapeHtml(person.email)}</td>
+                                        <td>${person.role === 'admin' ? '👑 Admin' : 'Coach'}</td>
+                                        <td>
+                                            ${person.role === 'coach' ? `
+                                                <button class="btn" data-coach-id="${person.id}" data-coach-email="${escapeHtml(person.email)}" onclick="removeCoach(this.dataset.coachId, this.dataset.coachEmail)" style="padding: 6px 12px; font-size: 12px; background: #e74c3c; color: white;">
+                                                    ✖️ Remove
+                                                </button>
+                                            ` : `
+                                                <span style="color: #7f8c8d; font-size: 12px;">-</span>
+                                            `}
+                                        </td>
+                                    </tr>
+                                `).join('')}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+                ` : ''}
             `;
 
             // Render pending requests
@@ -4989,14 +5052,75 @@ Example:
             }
 
             try {
+                // completeSignIn only consults coach_invites for an email
+                // that has never signed in before - someone who already
+                // has a profile (a parent, or a coach removed earlier)
+                // needs it promoted directly, or inviting them again
+                // would silently do nothing the next time they sign in.
+                const { data: existingProfile, error: lookupError } = await supabaseClient
+                    .from('profiles')
+                    .select('id, role')
+                    .ilike('email', email)
+                    .maybeSingle();
+                if (lookupError) throw lookupError;
+
+                if (existingProfile && existingProfile.role !== 'coach' && existingProfile.role !== 'admin') {
+                    const { error: promoteError } = await supabaseClient
+                        .from('profiles')
+                        .update({ role: 'coach' })
+                        .eq('id', existingProfile.id);
+                    if (promoteError) throw promoteError;
+                }
+
                 await insertCoachInviteToSupabase(name, email);
             } catch (error) {
                 alert(`Could not grant coach access: ${error.message}`);
                 return;
             }
 
+            await loadCoachesFromSupabase();
+            renderTeamManagement();
             closeModal('messageModal');
             alert(`Coach access granted! ${name} can now sign in with ${email}.`);
+        }
+
+        // Unlike revoking a parent (who gets re-checked against
+        // parent_access on every sign-in), a coach's access is never
+        // re-verified after their profile is created - so removing one
+        // has to actually change their profile, not just their invite.
+        // Demoting to 'parent' cuts off every coach-gated permission
+        // immediately (is_coach() reads this live), without touching any
+        // videos/messages/etc they already created (which reference this
+        // same profile id). Revoking their coach_invites row too stops
+        // them from just signing out and back in to reclaim it.
+        window.removeCoach = async function(profileId, email) {
+            const coach = appState.coaches.find(c => c.id === profileId);
+            if (!coach) return;
+
+            if (!confirm(`Remove ${coach.fullName || coach.email}'s coach access? They'll lose coach permissions immediately, and won't be able to sign back in as a coach unless invited again.`)) {
+                return;
+            }
+
+            try {
+                const { error: profileError } = await supabaseClient
+                    .from('profiles')
+                    .update({ role: 'parent' })
+                    .eq('id', profileId);
+                if (profileError) throw profileError;
+
+                const { error: inviteError } = await supabaseClient
+                    .from('coach_invites')
+                    .update({ status: 'revoked' })
+                    .ilike('email', email);
+                if (inviteError) throw inviteError;
+            } catch (error) {
+                alert(`Could not remove coach access: ${error.message}`);
+                return;
+            }
+
+            await loadCoachesFromSupabase();
+            renderTeamManagement();
+            alert(`${coach.fullName || coach.email} no longer has coach access.`);
         }
 
         // Approve Parent Request
