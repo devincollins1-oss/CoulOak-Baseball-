@@ -639,17 +639,22 @@
                 <p style="text-align: center; color: #7f8c8d;">Loading...</p>
             </div>
 
-            <!-- Default: enter email, request a sign-in link -->
+            <!-- Default: enter email, sign in with a password if one is set -->
             <div id="authEmailStep" style="display: none;">
                 <div class="form-group">
                     <label>Email</label>
                     <input type="email" id="authEmail" placeholder="you@example.com" autocomplete="email">
                 </div>
-                <p style="color: #7f8c8d; font-size: 13px; margin-bottom: 15px;">
-                    We'll email you a link to sign in - no password to remember.
-                    Coaches, parents, and athletes all sign in the same way.
+                <div class="form-group">
+                    <label>Password</label>
+                    <input type="password" id="authPassword" placeholder="Leave blank if you haven't set one yet" autocomplete="current-password">
+                </div>
+                <button class="btn btn-primary" onclick="signInWithPassword()">Sign In</button>
+                <p style="color: #7f8c8d; font-size: 13px; margin: 15px 0;">
+                    Haven't set a password yet, or forgot it? We'll email you a link to sign in instead -
+                    once you're in, you can set one from the app so you can log in directly next time.
                 </p>
-                <button class="btn btn-primary" onclick="sendMagicLink()">Send me a sign-in link</button>
+                <button class="btn btn-secondary" onclick="sendMagicLink()">Email me a sign-in link</button>
             </div>
 
             <!-- After requesting a link -->
@@ -695,6 +700,7 @@
             </div>
             <div class="user-info">
                 <div class="user-role" id="userRoleDisplay"></div>
+                <button class="logout-btn" onclick="openSetPasswordModal()">🔒 Set Password</button>
                 <button class="logout-btn" onclick="logout()">Logout</button>
             </div>
         </div>
@@ -1039,6 +1045,28 @@
             showAuthStep('authCheckEmailStep');
         }
 
+        window.signInWithPassword = async function() {
+            const email = document.getElementById('authEmail').value.trim();
+            const password = document.getElementById('authPassword').value;
+            if (!email) {
+                alert('Please enter your email');
+                return;
+            }
+            if (!password) {
+                alert('Enter your password, or use "Email me a sign-in link" below if you haven\'t set one yet.');
+                return;
+            }
+
+            const { error } = await supabaseClient.auth.signInWithPassword({ email, password });
+            if (error) {
+                alert(`Could not sign in: ${error.message}`);
+                return;
+            }
+            // Supabase fires a SIGNED_IN auth event on success, which the
+            // onAuthStateChange listener below picks up and resolves into
+            // a role - nothing else to do here.
+        }
+
         window.signOutAndReset = async function() {
             await supabaseClient.auth.signOut();
             location.reload();
@@ -1063,6 +1091,63 @@
             }
 
             await completeSignIn(user);
+        }
+
+        // Lets a signed-in user set/change the password they can use with
+        // "Sign In" on the login screen, instead of always needing a fresh
+        // magic link - handy on a phone where re-opening an email and
+        // tapping a link is far more friction than typing a password.
+        window.openSetPasswordModal = function() {
+            document.getElementById('messageModalContent').innerHTML = `
+                <h2 style="margin-bottom: 20px;">🔒 Set a Password</h2>
+                <p style="color: #7f8c8d; font-size: 13px; margin-bottom: 15px;">
+                    Set a password so you can sign in directly next time, instead of waiting on an email link.
+                </p>
+                <div class="form-group">
+                    <label>New Password</label>
+                    <input type="password" id="newPassword" autocomplete="new-password" placeholder="At least 6 characters">
+                </div>
+                <div class="form-group">
+                    <label>Confirm Password</label>
+                    <input type="password" id="newPasswordConfirm" autocomplete="new-password">
+                </div>
+                <div id="setPasswordStatus" style="color: #7f8c8d; font-size: 13px; margin-bottom: 10px;"></div>
+                <div style="display: flex; gap: 10px; margin-top: 10px;">
+                    <button class="btn btn-success" id="setPasswordSubmitBtn" onclick="confirmSetPassword()">✓ Save Password</button>
+                    <button class="btn btn-secondary" onclick="closeModal('messageModal')">Cancel</button>
+                </div>
+            `;
+            document.getElementById('messageModal').classList.add('active');
+        }
+
+        window.confirmSetPassword = async function() {
+            const password = document.getElementById('newPassword').value;
+            const confirm = document.getElementById('newPasswordConfirm').value;
+            const statusEl = document.getElementById('setPasswordStatus');
+
+            if (!password || password.length < 6) {
+                alert('Password must be at least 6 characters');
+                return;
+            }
+            if (password !== confirm) {
+                alert('Passwords do not match');
+                return;
+            }
+
+            const submitBtn = document.getElementById('setPasswordSubmitBtn');
+            submitBtn.disabled = true;
+            statusEl.textContent = 'Saving...';
+
+            const { error } = await supabaseClient.auth.updateUser({ password });
+            if (error) {
+                statusEl.textContent = '';
+                submitBtn.disabled = false;
+                alert(`Could not set password: ${error.message}`);
+                return;
+            }
+
+            closeModal('messageModal');
+            alert('Password set - you can now sign in with your email and this password.');
         }
 
         function dbPlayerToApp(row) {
@@ -6032,15 +6117,24 @@ Example:
         const uploadArea = document.getElementById('uploadArea');
         const csvFileInput = document.getElementById('csvFileInput');
 
+        // Guards against a second import starting while the first is still
+        // working through its rows one at a time (no visible progress is
+        // shown during that, so an impatient second click/drop is an easy
+        // real-world mistake) - two overlapping imports can race each other
+        // into inserting the same jersey number twice.
+        let csvImportInProgress = false;
+
         if (uploadArea) {
             uploadArea.addEventListener('click', () => {
+                if (csvImportInProgress) return;
                 csvFileInput.click();
             });
 
             csvFileInput.addEventListener('change', (e) => {
-                if (e.target.files.length > 0) {
+                if (e.target.files.length > 0 && !csvImportInProgress) {
                     handleFileUpload(e.target.files[0]);
                 }
+                csvFileInput.value = '';
             });
         }
 
@@ -6171,90 +6265,139 @@ Example:
             return { players, skipped };
         }
 
-        function handleFileUpload(file) {
-            const reader = new FileReader();
+        // A duplicate jersey number here means the row already exists in
+        // the database even though it wasn't found in this session's
+        // in-memory roster (stale/incomplete appState.players, or two
+        // imports racing each other) - 23505 is Postgres's unique-violation
+        // error code.
+        function isDuplicateJerseyError(error) {
+            return error && (error.code === '23505' || /duplicate key/i.test(error.message || ''));
+        }
 
-            reader.onload = async function(e) {
-                let parsed;
-                try {
-                    parsed = parseGameChangerCSV(e.target.result);
-                } catch (error) {
-                    document.getElementById('uploadStatus').innerHTML = `
-                        <div class="player-card" style="border-top: 3px solid #e74c3c;">
-                            <h3 style="color: #e74c3c;">✗ Could not import this file</h3>
-                            <p style="margin-top: 10px; color: #7f8c8d;">${escapeHtml(error.message)}</p>
-                        </div>
-                    `;
-                    return;
-                }
+        async function findPlayerByJerseyNumber(number) {
+            const { data, error } = await supabaseClient
+                .from('players')
+                .select('*')
+                .eq('jersey_number', number)
+                .maybeSingle();
+            if (error || !data) return null;
+            return dbPlayerToApp(data);
+        }
 
-                if (parsed.players.length === 0) {
-                    document.getElementById('uploadStatus').innerHTML = `
-                        <div class="player-card" style="border-top: 3px solid #e74c3c;">
-                            <h3 style="color: #e74c3c;">✗ No players found</h3>
-                            <p style="margin-top: 10px; color: #7f8c8d;">The file parsed, but no player rows with a jersey number were found.</p>
-                        </div>
-                    `;
-                    return;
-                }
-
-                // Update existing players (matched by jersey number, keeping
-                // any parent access intact) and add new ones. One row at a
-                // time against Supabase - rosters are small (a team's worth
-                // of players), so there's no need to parallelize this.
-                let addedCount = 0;
-                let updatedCount = 0;
-                const failures = [];
-
-                for (const imported of parsed.players) {
-                    const existing = appState.players.find(p => p.number === imported.number);
-                    try {
-                        if (existing) {
-                            Object.assign(existing, imported);
-                            await updatePlayerInSupabase(existing);
-                            updatedCount++;
-                        } else {
-                            const newPlayer = { ...imported };
-                            await insertPlayerToSupabase(newPlayer);
-                            appState.players.push(newPlayer);
-                            addedCount++;
-                        }
-                    } catch (error) {
-                        failures.push(`#${imported.number} ${imported.first} ${imported.last}: ${error.message}`);
-                    }
-                }
-
-                appState.players.sort((a, b) => a.number - b.number);
-                generateFocusSignals();
-                showCoachView();
-
-                if (failures.length > 0) {
-                    alert(`Imported with some errors - these rows did not save:\n\n${failures.join('\n')}`);
-                }
-
-                const skippedHtml = parsed.skipped.length > 0 ? `
-                    <div style="background: #fef3c7; border-left: 4px solid #f59e0b; padding: 12px; border-radius: 4px; margin-top: 15px;">
-                        <strong style="color: #92400e;">⚠️ Skipped ${parsed.skipped.length} player${parsed.skipped.length !== 1 ? 's' : ''} with no jersey number in the file:</strong>
-                        <ul style="margin: 8px 0 0 20px; color: #92400e;">
-                            ${parsed.skipped.map(s => `<li>${escapeHtml(`${s.first} ${s.last}`.trim())}</li>`).join('')}
-                        </ul>
-                        <p style="color: #92400e; margin: 8px 0 0 0; font-size: 13px;">Add them manually with a jersey number in Team Management.</p>
-                    </div>
-                ` : '';
-
+        async function importGameChangerCSV(text, fileName) {
+            let parsed;
+            try {
+                parsed = parseGameChangerCSV(text);
+            } catch (error) {
                 document.getElementById('uploadStatus').innerHTML = `
-                    <div class="player-card" style="border-top: 3px solid #27ae60;">
-                        <h3 style="color: #27ae60;">✓ Stats imported from ${escapeHtml(file.name)}</h3>
-                        <p style="margin-top: 10px;">${addedCount} player${addedCount !== 1 ? 's' : ''} added, ${updatedCount} player${updatedCount !== 1 ? 's' : ''} updated.</p>
-                        ${skippedHtml}
-                        <button class="btn btn-primary" style="margin-top: 15px;" onclick="document.querySelector('[data-tab=\\"focus-queue\\"]').click()">
-                            View Focus Queue →
-                        </button>
+                    <div class="player-card" style="border-top: 3px solid #e74c3c;">
+                        <h3 style="color: #e74c3c;">✗ Could not import this file</h3>
+                        <p style="margin-top: 10px; color: #7f8c8d;">${escapeHtml(error.message)}</p>
                     </div>
                 `;
+                return;
+            }
+
+            if (parsed.players.length === 0) {
+                document.getElementById('uploadStatus').innerHTML = `
+                    <div class="player-card" style="border-top: 3px solid #e74c3c;">
+                        <h3 style="color: #e74c3c;">✗ No players found</h3>
+                        <p style="margin-top: 10px; color: #7f8c8d;">The file parsed, but no player rows with a jersey number were found.</p>
+                    </div>
+                `;
+                return;
+            }
+
+            // Update existing players (matched by jersey number, keeping
+            // any parent access intact) and add new ones. One row at a
+            // time against Supabase - rosters are small (a team's worth
+            // of players), so there's no need to parallelize this.
+            let addedCount = 0;
+            let updatedCount = 0;
+            const failures = [];
+
+            for (const imported of parsed.players) {
+                const existing = appState.players.find(p => p.number === imported.number);
+                try {
+                    if (existing) {
+                        Object.assign(existing, imported);
+                        await updatePlayerInSupabase(existing);
+                        updatedCount++;
+                    } else {
+                        const newPlayer = { ...imported };
+                        await insertPlayerToSupabase(newPlayer);
+                        appState.players.push(newPlayer);
+                        addedCount++;
+                    }
+                } catch (error) {
+                    // The jersey number already exists in the database even
+                    // though it wasn't found in appState.players above - go
+                    // ask Supabase directly who actually has it and update
+                    // that row, instead of giving up on a row that's really
+                    // just a mismatch between this session's roster copy
+                    // and the real one.
+                    if (!existing && isDuplicateJerseyError(error)) {
+                        const dbPlayer = await findPlayerByJerseyNumber(imported.number);
+                        if (dbPlayer) {
+                            Object.assign(dbPlayer, imported);
+                            try {
+                                await updatePlayerInSupabase(dbPlayer);
+                                appState.players.push(dbPlayer);
+                                updatedCount++;
+                                continue;
+                            } catch (retryError) {
+                                error = retryError;
+                            }
+                        }
+                    }
+                    failures.push(`#${imported.number} ${imported.first} ${imported.last}: ${error.message}`);
+                }
+            }
+
+            appState.players.sort((a, b) => a.number - b.number);
+            generateFocusSignals();
+            showCoachView();
+
+            if (failures.length > 0) {
+                alert(`Imported with some errors - these rows did not save:\n\n${failures.join('\n')}`);
+            }
+
+            const skippedHtml = parsed.skipped.length > 0 ? `
+                <div style="background: #fef3c7; border-left: 4px solid #f59e0b; padding: 12px; border-radius: 4px; margin-top: 15px;">
+                    <strong style="color: #92400e;">⚠️ Skipped ${parsed.skipped.length} player${parsed.skipped.length !== 1 ? 's' : ''} with no jersey number in the file:</strong>
+                    <ul style="margin: 8px 0 0 20px; color: #92400e;">
+                        ${parsed.skipped.map(s => `<li>${escapeHtml(`${s.first} ${s.last}`.trim())}</li>`).join('')}
+                    </ul>
+                    <p style="color: #92400e; margin: 8px 0 0 0; font-size: 13px;">Add them manually with a jersey number in Team Management.</p>
+                </div>
+            ` : '';
+
+            document.getElementById('uploadStatus').innerHTML = `
+                <div class="player-card" style="border-top: 3px solid #27ae60;">
+                    <h3 style="color: #27ae60;">✓ Stats imported from ${escapeHtml(fileName)}</h3>
+                    <p style="margin-top: 10px;">${addedCount} player${addedCount !== 1 ? 's' : ''} added, ${updatedCount} player${updatedCount !== 1 ? 's' : ''} updated.</p>
+                    ${skippedHtml}
+                    <button class="btn btn-primary" style="margin-top: 15px;" onclick="document.querySelector('[data-tab=\\"focus-queue\\"]').click()">
+                        View Focus Queue →
+                    </button>
+                </div>
+            `;
+        }
+
+        function handleFileUpload(file) {
+            const reader = new FileReader();
+            csvImportInProgress = true;
+
+            reader.onload = async function(e) {
+                try {
+                    await importGameChangerCSV(e.target.result, file.name);
+                } finally {
+                    csvImportInProgress = false;
+                }
             };
 
             reader.onerror = function() {
+                csvImportInProgress = false;
                 document.getElementById('uploadStatus').innerHTML = `
                     <div class="player-card" style="border-top: 3px solid #e74c3c;">
                         <h3 style="color: #e74c3c;">✗ Error reading file</h3>
