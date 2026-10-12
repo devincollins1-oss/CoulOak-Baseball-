@@ -16,6 +16,16 @@
 // Supabase verifies the caller is signed in at all before this code
 // ever runs (the default verify_jwt behavior) - the checks below are
 // about WHICH player/scope they're allowed to upload for.
+//
+// Also handles a second request shape, { checkUid }: confirms with
+// Cloudflare directly whether a given upload actually landed. Needed
+// because Cloudflare's basic-POST direct-upload endpoint has been
+// observed returning a non-2xx (confirmed: a 500 with an empty body)
+// even when the file was received and encoded successfully - trusting
+// that response status alone produces false "upload failed" errors for
+// uploads that actually worked. The client calls this after the upload
+// POST, regardless of what status that POST reported, and only treats
+// the upload as failed if Cloudflare itself says the video doesn't exist.
 
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
@@ -43,11 +53,38 @@ Deno.serve(async (req) => {
     return jsonResponse({ error: 'Missing Authorization header' }, 401);
   }
 
-  let body: { scope?: 'team' | string; maxDurationSeconds?: number };
+  let body: { scope?: 'team' | string; maxDurationSeconds?: number; checkUid?: string };
   try {
     body = await req.json();
   } catch {
     return jsonResponse({ error: 'Invalid JSON body' }, 400);
+  }
+
+  const accountId = Deno.env.get('CLOUDFLARE_ACCOUNT_ID');
+  const apiToken = Deno.env.get('CLOUDFLARE_API_TOKEN');
+  if (!accountId || !apiToken) {
+    console.error('CLOUDFLARE_ACCOUNT_ID / CLOUDFLARE_API_TOKEN not set');
+    return jsonResponse({ error: 'Video upload is not configured on the server yet' }, 500);
+  }
+
+  // Status-check mode: just confirming the caller is signed in (above) is
+  // enough here - a Cloudflare video uid alone doesn't expose anything
+  // meaningful, so this doesn't need the same per-scope authorization as
+  // minting a new upload URL does.
+  if (body.checkUid) {
+    const statusResp = await fetch(
+      `https://api.cloudflare.com/client/v4/accounts/${accountId}/stream/${body.checkUid}`,
+      { headers: { Authorization: `Bearer ${apiToken}` } }
+    );
+    if (statusResp.status === 404) {
+      return jsonResponse({ exists: false });
+    }
+    const statusData = await statusResp.json();
+    if (!statusResp.ok || !statusData.success) {
+      console.error('Cloudflare status check error:', JSON.stringify(statusData));
+      return jsonResponse({ error: 'Could not check upload status' }, 502);
+    }
+    return jsonResponse({ exists: true, readyToStream: !!statusData.result?.readyToStream });
   }
 
   const { scope, maxDurationSeconds } = body;
@@ -81,13 +118,6 @@ Deno.serve(async (req) => {
     if (error || !player) {
       return jsonResponse({ error: 'Not authorized to upload for this player' }, 403);
     }
-  }
-
-  const accountId = Deno.env.get('CLOUDFLARE_ACCOUNT_ID');
-  const apiToken = Deno.env.get('CLOUDFLARE_API_TOKEN');
-  if (!accountId || !apiToken) {
-    console.error('CLOUDFLARE_ACCOUNT_ID / CLOUDFLARE_API_TOKEN not set');
-    return jsonResponse({ error: 'Video upload is not configured on the server yet' }, 500);
   }
 
   const cfResponse = await fetch(
