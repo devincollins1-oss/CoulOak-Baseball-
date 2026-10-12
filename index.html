@@ -4922,6 +4922,27 @@ Example:
         }
 
         // Open Invite Parent Modal
+        // Shared by the parent and coach invite flows: actually sends the
+        // sign-in email right away, rather than just granting access in
+        // the database and leaving the invited person to separately find
+        // the app and request their own link - which is what both invite
+        // modals already claimed happened ("a link we send them"), but
+        // until now, didn't. Doesn't throw - a failed send doesn't mean
+        // access wasn't granted, so callers should keep going and just
+        // tell the person to request their own link if this comes back
+        // false.
+        async function sendInviteEmail(email) {
+            const { error } = await supabaseClient.auth.signInWithOtp({
+                email,
+                options: { emailRedirectTo: location.href.split('#')[0] }
+            });
+            if (error) {
+                console.error('Could not send invite email:', error);
+                return false;
+            }
+            return true;
+        }
+
         window.openInviteParentModal = function() {
             document.getElementById('messageModalContent').innerHTML = `
                 <h2 style="margin-bottom: 20px;">📧 Invite Parent or Athlete</h2>
@@ -5002,11 +5023,15 @@ Example:
                 return;
             }
 
+            const emailSent = await sendInviteEmail(email);
+
             await loadParentAccessFromSupabase();
 
             renderTeamManagement();
             closeModal('messageModal');
-            alert(`Access granted! ${name} can now sign in with ${email} to see ${player.first} ${player.last}'s data.`);
+            alert(emailSent
+                ? `Access granted! We've emailed ${name} a sign-in link at ${email}.`
+                : `Access granted, but the invite email couldn't be sent. Have ${name} go to the app and enter ${email} to sign in themselves.`);
         }
 
         // Admin only - the "Invite Coach" button is hidden otherwise, and
@@ -5078,10 +5103,14 @@ Example:
                 return;
             }
 
+            const emailSent = await sendInviteEmail(email);
+
             await loadCoachesFromSupabase();
             renderTeamManagement();
             closeModal('messageModal');
-            alert(`Coach access granted! ${name} can now sign in with ${email}.`);
+            alert(emailSent
+                ? `Coach access granted! We've emailed ${name} a sign-in link at ${email}.`
+                : `Coach access granted, but the invite email couldn't be sent. Have ${name} go to the app and enter ${email} to sign in themselves.`);
         }
 
         // Unlike revoking a parent (who gets re-checked against
