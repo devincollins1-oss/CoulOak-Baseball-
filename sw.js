@@ -1,4 +1,4 @@
-const CACHE_VERSION = 'couloak-v2';
+const CACHE_VERSION = 'couloak-v3';
 
 const APP_SHELL = [
   './',

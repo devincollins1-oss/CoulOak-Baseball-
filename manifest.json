@@ -1,6 +1,6 @@
 {
-  "name": "Couloak Baseball",
-  "short_name": "Couloak",
+  "name": "Brain Fitness Coach Development OS",
+  "short_name": "Brain Fitness",
   "description": "Coaching, focus signals, and video for athletes, coaches, and parents.",
   "start_url": "./index.html",
   "scope": "./",
